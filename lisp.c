@@ -68,14 +68,14 @@ struct lisp_variable
 };
 
 static lisp_value_t
-lisp_nil ()
+lisp_nil (void)
 {
   lisp_value_t val = LISP_NIL;
   return val;
 }
 
 lisp_runtime_t *
-lisp_runtime_new ()
+lisp_runtime_new (void)
 {
   lisp_runtime_t *rt = malloc (sizeof (*rt));
   rt->nr_blocks = 0;
@@ -154,7 +154,7 @@ lisp_context_free (lisp_context_t *ctx)
 }
 
 lisp_value_t
-lisp_exception ()
+lisp_exception (void)
 {
   lisp_value_t val = LISP_EXCEPTION;
   return val;
@@ -799,6 +799,10 @@ lisp_value_to_string (lisp_context_t *ctx, lisp_value_ref_t val)
     case LISP_TAG_NIL:
       return lisp_strdup (ctx, "nil");
 
+    case LISP_TAG_EXCEPTION:
+      assert (0 && "exception");
+      return NULL;
+
     default:
       obj = val.ptr;
       if (obj->ops->to_string)
@@ -831,6 +835,8 @@ lisp_is_nil (lisp_value_ref_t val)
 {
   return val.tag == LISP_TAG_NIL;
 }
+
+LISP_DEFINE_SYMBOL (lisp_true, "#TRUE");
 
 int
 lisp_to_int32 (lisp_context_t *ctx, int32_t *result, lisp_value_ref_t val)
@@ -1114,6 +1120,7 @@ lisp_plus (lisp_context_t *ctx, lisp_value_ref_t args,
   int32_t num = 0;
   lisp_value_t result = LISP_EXCEPTION;
   lisp_value_t list = lisp_dup_value (ctx, args);
+
   (void)unused;
 
   while (!lisp_is_nil (list))
@@ -1212,7 +1219,7 @@ lisp_binary_op_number (lisp_context_t *ctx, lisp_value_ref_t args,
   LISP_DEFINE_SYMBOL (bit_or, "|");
   LISP_DEFINE_SYMBOL (bit_xor, "^");
 
-  LISP_DEFINE_SYMBOL (true_, "TRUE");
+  const lisp_value_t true_ = lisp_true;
 
   lisp_value_t arg1 = LISP_NIL;
   lisp_value_t arg2 = LISP_NIL;
@@ -1373,6 +1380,12 @@ lisp_do_print_car (lisp_context_t *ctx, lisp_value_ref_t list)
   lisp_value_t expr = lisp_car (ctx, list);
   lisp_value_t val = lisp_eval (ctx, expr);
 
+  if (LISP_IS_EXCEPTION( val))
+  {
+    lisp_free_value (ctx, expr);
+    return -1;
+  }
+
   char *str = lisp_value_to_string (ctx, val);
   printf ("%s", str);
   lisp_free (ctx, str);
@@ -1393,7 +1406,10 @@ lisp_print (lisp_context_t *ctx, lisp_value_ref_t args,
   lisp_dup_value (ctx, args);
   while (!lisp_is_nil (args))
     {
-      lisp_do_print_car (ctx, args);
+      if (lisp_do_print_car (ctx, args)) {
+        lisp_free_value (ctx, args);
+        return lisp_exception ();
+      }
       args = lisp_cdr_take (ctx, args);
     }
 
@@ -1602,6 +1618,167 @@ fail:
   return result;
 }
 
+static lisp_value_t
+lisp_null_p (lisp_context_t *ctx, lisp_value_ref_t args,
+             struct lisp_function *unused)
+{
+  lisp_value_t a = lisp_car (ctx, args);
+  lisp_value_t av;
+  lisp_value_t r = LISP_NIL;
+
+  (void)unused;
+
+  if (LISP_IS_EXCEPTION (a))
+    return lisp_exception ();
+
+  av = lisp_eval (ctx, a);
+  if (LISP_IS_EXCEPTION (av))
+    {
+      lisp_free_value (ctx, a);
+      return av;
+    }
+
+  if (lisp_is_nil (av))
+    r = lisp_dup_value (ctx, lisp_true);
+
+  lisp_free_value (ctx, av);
+  lisp_free_value (ctx, a);
+  return r;
+}
+
+static lisp_value_t
+lisp_get_car (lisp_context_t *ctx, lisp_value_ref_t args,
+              struct lisp_function *unused)
+{
+  lisp_value_t a = lisp_car (ctx, args);
+  lisp_value_t av;
+  lisp_value_t r = LISP_NIL;
+
+  (void)unused;
+
+  if (LISP_IS_EXCEPTION (a))
+    return lisp_exception ();
+
+  av = lisp_eval (ctx, a);
+  lisp_free_value (ctx, a);
+  if (LISP_IS_EXCEPTION (av))
+    return lisp_exception ();
+
+  r = lisp_car (ctx, av);
+
+  lisp_free_value (ctx, av);
+  return r;
+}
+
+static lisp_value_t
+lisp_get_cdr (lisp_context_t *ctx, lisp_value_ref_t args,
+              struct lisp_function *unused)
+{
+  lisp_value_t a = lisp_car (ctx, args);
+  lisp_value_t av;
+  lisp_value_t r = LISP_NIL;
+
+  (void)unused;
+
+  if (LISP_IS_EXCEPTION (a))
+    return lisp_exception ();
+  av = lisp_eval (ctx, a);
+  lisp_free_value (ctx, a);
+  if (LISP_IS_EXCEPTION (av))
+    return lisp_exception ();
+
+  r = lisp_cdr (ctx, av);
+
+  lisp_free_value (ctx, av);
+  return r;
+}
+
+static lisp_value_t
+lisp_cons (lisp_context_t *ctx, lisp_value_ref_t args,
+           struct lisp_function *unused)
+{
+  lisp_value_t a = lisp_car (ctx, args);
+  lisp_value_t b;
+  lisp_value_t r;
+
+  (void)unused;
+
+  args = lisp_cdr (ctx, args);
+  b = lisp_car (ctx, args);
+
+  lisp_free_value (ctx, args);
+
+  r = lisp_new_cons (ctx, lisp_eval (ctx, a), lisp_eval (ctx, b));
+
+  lisp_free_value (ctx, b);
+  lisp_free_value (ctx, a);
+
+  return r;
+}
+
+static lisp_value_t
+lisp_list (lisp_context_t *ctx, lisp_value_ref_t args,
+           struct lisp_function *unused)
+{
+  (void)unused;
+
+  return lisp_dup_value (ctx, args);
+}
+
+static lisp_value_t
+lisp_zero_p (lisp_context_t *ctx, lisp_value_ref_t args,
+             struct lisp_function *unused)
+{
+  lisp_value_t a = lisp_car (ctx, args);
+  lisp_value_t av = lisp_eval (ctx, a);
+  lisp_value_t r = LISP_EXCEPTION;
+  (void)unused;
+
+  if (LISP_IS_EXCEPTION (av))
+    {
+    }
+
+  else if ((av.tag == LISP_TAG_INT32 && av.i32 == 0)
+           || (av.tag == LISP_TAG_INT64 && av.i64 == 0))
+    {
+      r = lisp_dup_value (ctx, lisp_true);
+    }
+  else
+    {
+      r = lisp_nil ();
+    }
+  lisp_free_value (ctx, av);
+  lisp_free_value (ctx, a);
+  return r;
+}
+
+static lisp_value_t
+lisp_atom_p (lisp_context_t *ctx, lisp_value_ref_t args,
+             struct lisp_function *unused)
+{
+  lisp_value_t a = lisp_car (ctx, args);
+  lisp_value_t av = lisp_eval (ctx, a);
+  lisp_value_t r = LISP_EXCEPTION;
+  (void)unused;
+
+  if (LISP_IS_EXCEPTION (av))
+    {
+    }
+
+  else if (av.tag == LISP_TAG_SYMBOL || av.tag == LISP_TAG_INT32 ||
+    av.tag == LISP_TAG_INT64 || av.tag == LISP_TAG_STRING || av.tag == LISP_TAG_NIL)
+    {
+      r = lisp_dup_value (ctx, lisp_true);
+    }
+  else
+    {
+      r = lisp_nil ();
+    }
+  lisp_free_value (ctx, av);
+  lisp_free_value (ctx, a);
+  return r;
+}
+
 static int
 lisp_define_function (lisp_context_t *ctx, lisp_value_t name,
                       lisp_value_t data, lisp_native_invoke_t invoker)
@@ -1656,6 +1833,14 @@ lisp_new_global_context (lisp_runtime_t *rt)
   LISP_DEFINE_FUNCTION (ctx, "lambda", nil, &lisp_lambda);
   LISP_DEFINE_FUNCTION (ctx, "funcall", nil, &lisp_funcall);
   LISP_DEFINE_FUNCTION (ctx, "function", nil, &lisp_function);
+
+  LISP_DEFINE_FUNCTION (ctx, "null", nil, &lisp_null_p);
+  LISP_DEFINE_FUNCTION (ctx, "car", nil, &lisp_get_car);
+  LISP_DEFINE_FUNCTION (ctx, "cdr", nil, &lisp_get_cdr);
+  LISP_DEFINE_FUNCTION (ctx, "cons", nil, &lisp_cons);
+  LISP_DEFINE_FUNCTION (ctx, "list", nil, &lisp_list);
+  LISP_DEFINE_FUNCTION (ctx, "atom", nil, &lisp_atom_p);
+  LISP_DEFINE_FUNCTION (ctx, "zero", nil, &lisp_zero_p);
 
   return ctx;
 }

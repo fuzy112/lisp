@@ -30,7 +30,6 @@ typedef struct lisp_value
 } lisp_value_t;
 #define lisp_value_ref_t lisp_value_t
 
-
 typedef struct lisp_context lisp_context_t;
 typedef struct lisp_runtime lisp_runtime_t;
 
@@ -45,8 +44,7 @@ lisp_runtime_t *lisp_get_runtime (lisp_context_t *ctx);
 void *lisp_malloc (lisp_context_t *ctx, size_t size);
 void lisp_free (lisp_context_t *ctx, void *p);
 
-char *
-lisp_strdup_rt (lisp_runtime_t *rt, char const *s);
+char *lisp_strdup_rt (lisp_runtime_t *rt, char const *s);
 
 void *lisp_malloc_rt (lisp_runtime_t *ctx, size_t size);
 void lisp_free_rt (lisp_runtime_t *ctx, void *p);
@@ -74,7 +72,7 @@ lisp_value_t lisp_eval (lisp_context_t *ctx, lisp_value_ref_t exp);
     LISP_TAG_EXCEPTION, { .i32 = 0 },                                         \
   }
 
-#define LISP_IS_EXCEPTION(val)  (val.tag == LISP_TAG_EXCEPTION)
+#define LISP_IS_EXCEPTION(val) (val.tag == LISP_TAG_EXCEPTION)
 
 lisp_value_t lisp_new_cons (lisp_context_t *ctx, lisp_value_t car,
                             lisp_value_t cdr);
