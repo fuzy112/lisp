@@ -12,3 +12,10 @@
 
 (print (fib-1 25))
 
+(setq my-lambda (lambda (y) (+ y 1)))
+(print (funcall my-lambda 10))
+
+(print (funcall 'fib 10))
+
+(print (funcall (function fib) 10))
+(print (funcall #'fib 10))

@@ -15,6 +15,7 @@ enum lisp_tag
   LISP_TAG_SYMBOL,
   LISP_TAG_STRING,
   LISP_TAG_LIST,
+  LISP_TAG_LAMBDA,
 };
 
 typedef struct lisp_value

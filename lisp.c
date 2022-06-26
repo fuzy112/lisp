@@ -764,8 +764,16 @@ lisp_parse (lisp_context_t *ctx, const char **text)
   if ((*text)[0] == '\'')
     {
       *text += 1;
-      return lisp_new_cons (ctx, lisp_new_symbol (ctx, "quote"),
-                            lisp_parse (ctx, text));
+      return lisp_new_cons (
+          ctx, lisp_new_symbol (ctx, "quote"),
+          lisp_new_cons (ctx, lisp_parse (ctx, text), lisp_nil ()));
+    }
+  if ((*text)[0] == '#' && (*text)[1] == '\'')
+    {
+      *text += 2;
+      return lisp_new_cons (
+          ctx, lisp_new_symbol (ctx, "function"),
+          lisp_new_cons (ctx, lisp_parse (ctx, text), lisp_nil ()));
     }
   return lisp_parse_atom (ctx, text);
 }
@@ -839,6 +847,48 @@ lisp_to_int32 (lisp_context_t *ctx, int32_t *result, lisp_value_ref_t val)
       return -1;
     }
   return 0;
+}
+
+static struct lisp_function *
+lisp_context_find_function (lisp_context_t *ctx, lisp_value_ref_t name)
+{
+  struct lisp_function *fn = NULL;
+
+  if (name.tag == LISP_TAG_SYMBOL)
+    {
+      list_for_each_entry (fn, &ctx->func_list, list)
+      {
+        if (lisp_sym_eq (fn->name, name))
+          {
+            return fn;
+          }
+      }
+
+      if (ctx->parent)
+        {
+          return lisp_context_find_function (ctx->parent, name);
+        }
+    }
+  return fn;
+}
+
+static struct lisp_variable *
+lisp_context_find_variable (lisp_context_t *ctx, lisp_value_ref_t name)
+{
+  struct lisp_variable *var;
+
+  list_for_each_entry (var, &ctx->var_list, list)
+  {
+    if (lisp_sym_eq (var->name, name))
+      return var;
+  }
+
+  if (ctx->parent)
+    {
+      return lisp_context_find_variable (ctx->parent, name);
+    }
+
+  return NULL;
 }
 
 /**
@@ -939,7 +989,6 @@ lisp_function_set_args (lisp_context_t *ctx, lisp_value_ref_t params,
                         lisp_value_ref_t args)
 {
   lisp_value_t list = LISP_NIL;
-
 
   lisp_dup_value (ctx, params);
   lisp_dup_value (ctx, args);
@@ -1043,7 +1092,7 @@ lisp_quote (lisp_context_t *ctx, lisp_value_ref_t list,
             struct lisp_function *unused)
 {
   (void)unused;
-  return lisp_dup_value (ctx, list);
+  return lisp_car (ctx, list);
 }
 
 lisp_value_t
@@ -1398,6 +1447,161 @@ fail:
   return res;
 }
 
+struct lisp_lambda
+{
+  struct lisp_object obj;
+  struct lisp_function func;
+};
+
+static void
+lisp_lambda_free (lisp_context_t *ctx, struct lisp_object *obj)
+{
+  struct lisp_lambda *lambda = (struct lisp_lambda *)obj;
+  lisp_free_value (ctx, lambda->func.name);
+  lisp_free_value (ctx, lambda->func.body);
+  lisp_free_value (ctx, lambda->func.params);
+  lisp_free (ctx, lambda);
+}
+
+static const struct lisp_object_operations lisp_lamba_operations = {
+  .free = &lisp_lambda_free,
+};
+
+/**
+ * (lambda (args...) body)
+ */
+static lisp_value_t
+lisp_lambda (lisp_context_t *ctx, lisp_value_ref_t args,
+             struct lisp_function *unused)
+{
+  LISP_DEFINE_SYMBOL (name, "#LAMBDA")
+  lisp_value_t params;
+  lisp_value_t body;
+  struct lisp_lambda *lambda = lisp_malloc (ctx, sizeof (*lambda));
+
+  (void)unused;
+
+  lisp_value_t val = { LISP_TAG_LAMBDA, { .ptr = lambda } };
+
+  params = lisp_car (ctx, args);
+  body = lisp_cdr (ctx, args);
+
+  lambda->func.name = lisp_dup_value (ctx, name);
+  lambda->func.params = params;
+  lambda->func.body = body;
+  lambda->func.invoker = &lisp_function_invoker;
+
+  lambda->obj.ref_count = 1;
+  lambda->obj.ops = &lisp_lamba_operations;
+  list_add_tail (&lambda->obj.list, &ctx->object_list);
+
+  return val;
+}
+
+/**
+ *  (funcall LAMBDA args)
+ *  (funcall SYMBOL args)
+ */
+static lisp_value_t
+lisp_funcall (lisp_context_t *ctx, lisp_value_ref_t args,
+              struct lisp_function *unused)
+{
+  lisp_value_t result = LISP_EXCEPTION;
+  lisp_value_t func_arg_val = LISP_NIL;
+  lisp_value_t func_arg = lisp_car (ctx, args);
+  lisp_value_t real_args = LISP_NIL;
+
+  (void)unused;
+
+  if (LISP_IS_EXCEPTION (func_arg))
+    return lisp_exception ();
+  func_arg_val = lisp_eval (ctx, func_arg);
+  if (LISP_IS_EXCEPTION (func_arg_val))
+    goto fail;
+
+  real_args = lisp_cdr (ctx, args);
+  if (LISP_IS_EXCEPTION (real_args))
+    goto fail;
+
+  if (func_arg_val.tag == LISP_TAG_SYMBOL)
+    {
+      lisp_value_t sexpr
+          = lisp_new_cons (ctx, lisp_dup_value (ctx, func_arg_val),
+                           lisp_dup_value (ctx, real_args));
+      result = lisp_eval (ctx, sexpr);
+      lisp_free_value (ctx, sexpr);
+    }
+  else if (func_arg_val.tag == LISP_TAG_LAMBDA)
+    {
+      struct lisp_lambda *lambda = func_arg_val.ptr;
+      result = lambda->func.invoker (ctx, real_args, &lambda->func);
+    }
+  else
+    {
+      result = lisp_throw_internal_error (ctx, "Argument not callable");
+    }
+
+fail:
+  lisp_free_value (ctx, real_args);
+  lisp_free_value (ctx, func_arg);
+  lisp_free_value (ctx, func_arg_val);
+
+  return result;
+}
+
+static lisp_value_t
+lisp_function (lisp_context_t *ctx, lisp_value_ref_t args,
+               struct lisp_function *unused)
+{
+  lisp_value_t result = LISP_EXCEPTION;
+  lisp_value_t func = lisp_car (ctx, args);
+
+  (void)unused;
+
+  if (func.tag != LISP_TAG_SYMBOL)
+    {
+      lisp_throw_internal_error (ctx, "expected a symbol");
+      goto fail;
+    }
+  {
+    lisp_value_t cdr = lisp_cdr (ctx, args);
+    if (!lisp_is_nil (cdr))
+      {
+        lisp_free_value (ctx, cdr);
+        lisp_throw_internal_error (ctx, "too many arguments");
+        goto fail;
+      }
+  }
+
+  {
+    struct lisp_lambda *lambda;
+    struct lisp_function *fn = lisp_context_find_function (ctx, func);
+    if (!fn)
+      {
+        lisp_throw_internal_error (ctx, "No such function");
+        goto fail;
+      }
+
+    lambda = lisp_malloc (ctx, sizeof (*lambda));
+    lambda->func.name = lisp_dup_value (ctx, fn->name);
+    lambda->func.params = lisp_dup_value (ctx, fn->params);
+    lambda->func.body = lisp_dup_value (ctx, fn->body);
+    lambda->func.invoker = fn->invoker;
+
+    lambda->obj.ref_count = 1;
+    lambda->obj.ops = &lisp_lamba_operations;
+    list_add_tail (&lambda->obj.list, &ctx->object_list);
+
+    result.tag = LISP_TAG_LAMBDA;
+    result.ptr = lambda;
+  }
+
+fail:
+  lisp_free_value (ctx, func);
+
+  return result;
+}
+
 static int
 lisp_define_function (lisp_context_t *ctx, lisp_value_t name,
                       lisp_value_t data, lisp_native_invoke_t invoker)
@@ -1449,46 +1653,11 @@ lisp_new_global_context (lisp_runtime_t *rt)
   LISP_DEFINE_FUNCTION (ctx, "|", nil, &lisp_binary_op_number);
   LISP_DEFINE_FUNCTION (ctx, "^", nil, &lisp_binary_op_number);
 
+  LISP_DEFINE_FUNCTION (ctx, "lambda", nil, &lisp_lambda);
+  LISP_DEFINE_FUNCTION (ctx, "funcall", nil, &lisp_funcall);
+  LISP_DEFINE_FUNCTION (ctx, "function", nil, &lisp_function);
+
   return ctx;
-}
-
-static struct lisp_function *
-lisp_context_find_function (lisp_context_t *ctx, lisp_value_ref_t name)
-{
-  struct lisp_function *fn;
-  list_for_each_entry (fn, &ctx->func_list, list)
-  {
-    if (lisp_sym_eq (fn->name, name))
-      {
-        return fn;
-      }
-  }
-
-  if (ctx->parent)
-    {
-      return lisp_context_find_function (ctx->parent, name);
-    }
-
-  return NULL;
-}
-
-static struct lisp_variable *
-lisp_context_find_variable (lisp_context_t *ctx, lisp_value_ref_t name)
-{
-  struct lisp_variable *var;
-
-  list_for_each_entry (var, &ctx->var_list, list)
-  {
-    if (lisp_sym_eq (var->name, name))
-      return var;
-  }
-
-  if (ctx->parent)
-    {
-      return lisp_context_find_variable (ctx->parent, name);
-    }
-
-  return NULL;
 }
 
 lisp_value_t
@@ -1503,14 +1672,17 @@ lisp_eval (lisp_context_t *ctx, lisp_value_ref_t val)
       if (!fn)
         lisp_throw_internal_error (ctx, "Function %s not found",
                                    LISP_SYMBOL_STR (func));
-      lisp_free_value (ctx, func);
 
       if (!fn)
-        return lisp_exception ();
+        {
+          lisp_free_value (ctx, func);
+          return lisp_exception ();
+        }
 
       args = lisp_cdr (ctx, val);
       r = fn->invoker (ctx, args, fn);
       lisp_free_value (ctx, args);
+      lisp_free_value (ctx, func);
 
       return r;
     }
