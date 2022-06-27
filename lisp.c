@@ -264,6 +264,9 @@ lisp_free_value (lisp_context_t *ctx, lisp_value_t val)
 static void *
 lisp_get_object (lisp_context_t *ctx, lisp_value_ref_t val, unsigned tag)
 {
+  if (LISP_IS_EXCEPTION (val))
+    return NULL;
+
   if (val.tag != tag)
     {
       lisp_throw_internal_error (ctx, "Type mismatch");
@@ -337,7 +340,8 @@ string_buf_append (struct string_buf *buf, const char *str, size_t len)
 static lisp_value_t
 lisp_car (lisp_context_t *ctx, lisp_value_ref_t val)
 {
-  struct lisp_cons *cons = lisp_get_object (ctx, val, LISP_TAG_LIST);
+  struct lisp_cons *cons;
+  cons = lisp_get_object (ctx, val, LISP_TAG_LIST);
   if (!cons)
     return lisp_exception ();
   return lisp_dup_value (ctx, cons->car);
@@ -346,7 +350,8 @@ lisp_car (lisp_context_t *ctx, lisp_value_ref_t val)
 static lisp_value_t
 lisp_cdr (lisp_context_t *ctx, lisp_value_ref_t val)
 {
-  struct lisp_cons *cons = lisp_get_object (ctx, val, LISP_TAG_LIST);
+  struct lisp_cons *cons;
+  cons = lisp_get_object (ctx, val, LISP_TAG_LIST);
   if (!cons)
     return lisp_exception ();
   return lisp_dup_value (ctx, cons->cdr);
@@ -427,8 +432,16 @@ static const struct lisp_object_operations lisp_cons_operations = {
 lisp_value_t
 lisp_new_cons (lisp_context_t *ctx, lisp_value_t car, lisp_value_t cdr)
 {
-  struct lisp_cons *cons = lisp_malloc (ctx, sizeof (*cons));
-  lisp_value_t val = LISP_OBJECT (LISP_TAG_LIST, cons);
+  struct lisp_cons *cons;
+
+  if (LISP_IS_EXCEPTION (car) || LISP_IS_EXCEPTION (cdr))
+    {
+      lisp_free_value (ctx, car);
+      lisp_free_value (ctx, cdr);
+      return lisp_exception ();
+    }
+
+  cons = lisp_malloc (ctx, sizeof (*cons));
   if (!cons)
     return lisp_throw_out_of_memory (ctx);
 
@@ -439,7 +452,10 @@ lisp_new_cons (lisp_context_t *ctx, lisp_value_t car, lisp_value_t cdr)
   cons->cdr = cdr;
 
   list_add_tail (&cons->obj.list, &ctx->object_list);
-  return val;
+  {
+    lisp_value_t val = LISP_OBJECT (LISP_TAG_LIST, cons);
+    return val;
+  }
 }
 
 struct lisp_symbol
@@ -475,17 +491,22 @@ static const struct lisp_object_operations lisp_static_symbol_operations = {
   .to_string = &lisp_symbol_to_string,
 };
 
-
 static char *
 lisp_toupper (lisp_context_t *ctx, const char *str)
 {
   size_t i;
-  size_t len = strlen (str);
-  char *r = lisp_malloc (ctx, len + 1);
+  size_t len;
+  char *r;
+
+  if (!str)
+    return NULL;
+
+  len = strlen (str);
+  r = lisp_malloc (ctx, len + 1);
   if (!r)
     return NULL;
   for (i = 0; i < len + 1; ++i)
-    r[i] = toupper(str[i]);
+    r[i] = toupper (str[i]);
   return r;
 }
 
@@ -494,6 +515,8 @@ lisp_new_symbol_full (lisp_context_t *ctx, const char *name, int is_static)
 {
   struct lisp_symbol *sym = lisp_malloc (ctx, sizeof (*sym));
   lisp_value_t val = LISP_OBJECT (LISP_TAG_SYMBOL, sym);
+
+  assert (name != NULL);
   sym->is_static = is_static;
   sym->name = lisp_toupper (ctx, name);
 
@@ -524,7 +547,7 @@ lisp_new_symbol (lisp_context_t *ctx, const char *name)
   static lisp_value_t name                                                    \
       = LISP_OBJECT (LISP_TAG_SYMBOL, &static_symbol_##name);
 
-static int
+static unsigned
 lisp_sym_eq (lisp_value_ref_t a, lisp_value_ref_t b)
 {
   return a.tag == LISP_TAG_SYMBOL && b.tag == LISP_TAG_SYMBOL
@@ -627,6 +650,8 @@ lisp_throw_internal_error (lisp_context_t *ctx, const char *fmt, ...)
   va_list ap;
   lisp_value_t err_msg;
 
+  assert (fmt != NULL);
+
   va_start (ap, fmt);
   vsnprintf (buffer, sizeof (buffer), fmt, ap);
   va_end (ap);
@@ -661,6 +686,9 @@ lisp_print_exception (lisp_context_t *ctx)
 static char *
 skipws (const char *text)
 {
+  if (!text)
+    return NULL;
+
   while (*text && isspace (*text))
     ++text;
 
@@ -1098,19 +1126,24 @@ static int
 lisp_set_value_in_context (lisp_context_t *ctx, lisp_value_t name,
                            lisp_value_t value)
 {
-  struct lisp_variable *var = lisp_malloc (ctx, sizeof (*var));
+  struct lisp_variable *var;
+
+  if (LISP_IS_EXCEPTION (name) || LISP_IS_EXCEPTION (value))
+    goto fail;
+  var = lisp_malloc (ctx, sizeof (*var));
   if (!var)
-    {
-      lisp_free_value (ctx, name);
-      lisp_free_value (ctx, value);
-      return -1;
-    }
+    goto fail;
   var->name = name;
   var->value = value;
 
   list_add (&var->list, &ctx->var_list);
 
   return 0;
+
+fail:
+  lisp_free_value (ctx, name);
+  lisp_free_value (ctx, value);
+  return -1;
 }
 
 /**
@@ -1710,7 +1743,7 @@ lisp_atom_p (lisp_context_t *ctx, lisp_value_ref_t args,
 
   else if (av.tag == LISP_TAG_SYMBOL || av.tag == LISP_TAG_INT32
            || av.tag == LISP_TAG_INT64 || av.tag == LISP_TAG_STRING
-           || LISP_IS_NIL (av) )
+           || LISP_IS_NIL (av))
     {
       r = lisp_dup_value (ctx, lisp_true ());
     }
@@ -1785,7 +1818,7 @@ lisp_value_t
 lisp_eval (lisp_context_t *ctx, lisp_value_ref_t val)
 {
   lisp_value_t r = LISP_NIL;
-  if (LISP_IS_LIST (val) && !LISP_IS_NIL(val))
+  if (LISP_IS_LIST (val) && !LISP_IS_NIL (val))
     {
       lisp_value_t args;
       lisp_value_t func_expr = lisp_car (ctx, val);

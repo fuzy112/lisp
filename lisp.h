@@ -100,8 +100,9 @@ lisp_value_t lisp_eval (lisp_context_t *ctx, lisp_value_ref_t exp);
 
 #define LISP_IS_ATOM(val) ((val).tag < LISP_TAG_LIST)
 
-#define LISP_IS_OBJECT(val) ((val).tag != LISP_TAG_INT32 && \
-    (val).tag != LISP_TAG_INT64 && (val).tag != LISP_TAG_BOOLEAN && ((val).tag != LISP_TAG_EXCEPTION))
+#define LISP_IS_OBJECT(val)                                                   \
+  ((val).tag != LISP_TAG_INT32 && (val).tag != LISP_TAG_INT64                 \
+   && (val).tag != LISP_TAG_BOOLEAN && ((val).tag != LISP_TAG_EXCEPTION))
 
 lisp_value_t lisp_new_cons (lisp_context_t *ctx, lisp_value_t car,
                             lisp_value_t cdr);
