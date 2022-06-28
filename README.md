@@ -4,6 +4,7 @@ A toy LISP interpreter implemented in C
 
 ## Todos
 
-- macros
-- modules
-- gobject
+- [ ] static scope
+- [ ] macros
+- [ ] modules
+- [ ] gobject
