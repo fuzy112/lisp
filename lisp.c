@@ -4,6 +4,7 @@
 #include <assert.h>
 #include <ctype.h>
 #include <errno.h>
+#include <inttypes.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -75,12 +76,18 @@ static const struct lisp_object_operations lisp_function_operations = {
   .free = &lisp_function_free,
 };
 
+struct lisp_variable_store
+{
+  int ref_count;
+  lisp_value_t value;
+};
+
 struct lisp_variable
 {
   struct list_head list;
 
   lisp_value_t name;
-  lisp_value_t value;
+  struct lisp_variable_store *store;
 };
 
 static lisp_value_t
@@ -108,6 +115,38 @@ lisp_runtime_free (lisp_runtime_t *rt)
   free (rt);
 }
 
+struct lisp_variable_store *
+lisp_variable_store_new (lisp_context_t *ctx)
+{
+  struct lisp_variable_store *store;
+
+  store = lisp_malloc (ctx, sizeof (*store));
+  store->value = lisp_nil ();
+  store->ref_count = 1;
+
+  return store;
+}
+
+struct lisp_variable_store *
+lisp_variable_store_ref (lisp_context_t *ctx,
+                         struct lisp_variable_store *store)
+{
+  (void)ctx;
+  store->ref_count++;
+  return store;
+}
+
+void
+lisp_variable_store_unref (lisp_context_t *ctx,
+                           struct lisp_variable_store *store)
+{
+  if (--store->ref_count > 0)
+    return;
+
+  lisp_free_value (ctx, store->value);
+  lisp_free (ctx, store);
+}
+
 lisp_context_t *
 lisp_context_new (lisp_runtime_t *rt, const char *name)
 {
@@ -130,7 +169,7 @@ lisp_context_free (lisp_context_t *ctx)
   list_for_each_entry_safe (var, tmp_var, &ctx->var_list, list)
   {
     lisp_free_value (ctx, var->name);
-    lisp_free_value (ctx, var->value);
+    lisp_variable_store_unref (ctx, var->store);
     list_del (&var->list);
     lisp_free (ctx, var);
   }
@@ -841,12 +880,12 @@ lisp_value_to_string (lisp_context_t *ctx, lisp_value_ref_t val)
     {
     case LISP_TAG_INT32:
       r = lisp_malloc (ctx, 21);
-      snprintf (r, 20, "%d", val.i32);
+      snprintf (r, 20, "%" PRIi32, val.i32);
       return r;
 
     case LISP_TAG_INT64:
       r = lisp_malloc (ctx, 41);
-      snprintf (r, 40, "%ld", val.i64);
+      snprintf (r, 40, "%" PRIi64, val.i64);
       return r;
 
     case LISP_TAG_BOOLEAN:
@@ -908,7 +947,7 @@ lisp_to_int32 (lisp_context_t *ctx, int32_t *result, lisp_value_ref_t val)
   return 0;
 }
 
-static struct lisp_variable *
+static struct lisp_variable_store *
 lisp_context_find_variable (lisp_context_t *ctx, lisp_value_ref_t name)
 {
   struct lisp_variable *var;
@@ -916,7 +955,7 @@ lisp_context_find_variable (lisp_context_t *ctx, lisp_value_ref_t name)
   list_for_each_entry (var, &ctx->var_list, list)
   {
     if (lisp_sym_eq (var->name, name))
-      return var;
+      return lisp_variable_store_ref (ctx, var->store);
   }
 
   if (ctx->parent)
@@ -925,53 +964,6 @@ lisp_context_find_variable (lisp_context_t *ctx, lisp_value_ref_t name)
     }
 
   return NULL;
-}
-
-/**
- * (set var1 value1
- *       [var2 value2
- *        ...])
- */
-static lisp_value_t
-lisp_set (lisp_context_t *ctx, lisp_value_ref_t params,
-          struct lisp_function *unused)
-{
-  (void)unused;
-  lisp_value_t nil = LISP_NIL;
-  lisp_value_t tmp;
-
-  lisp_value_t name;
-  lisp_value_t value_exp;
-  lisp_value_t value;
-
-  struct lisp_variable *var;
-
-  LIST_HEAD (var_list);
-
-  lisp_dup_value (ctx, params);
-  while (!LISP_IS_NIL (params))
-    {
-      name = lisp_car (ctx, params);
-      tmp = lisp_cdr (ctx, params);
-      value_exp = lisp_car (ctx, tmp);
-      value = lisp_eval (ctx, value_exp);
-
-      var = lisp_malloc (ctx, sizeof (*var));
-      var->name = lisp_eval (ctx, name);
-      var->value = value;
-
-      lisp_free_value (ctx, name);
-      lisp_free_value (ctx, value_exp);
-      lisp_free_value (ctx, params);
-      params = lisp_cdr (ctx, tmp);
-      lisp_free_value (ctx, tmp);
-
-      list_add (&var->list, &var_list);
-    }
-  lisp_free_value (ctx, params);
-
-  list_splice (&var_list, &ctx->var_list);
-  return nil;
 }
 
 /**
@@ -1005,7 +997,8 @@ lisp_setq (lisp_context_t *ctx, lisp_value_ref_t params,
 
       var = lisp_malloc (ctx, sizeof (*var));
       var->name = name;
-      var->value = value;
+      var->store = lisp_variable_store_new (ctx);
+      var->store->value = value;
 
       lisp_free_value (ctx, value_exp);
       lisp_free_value (ctx, params);
@@ -1122,21 +1115,54 @@ lisp_set_function_name (lisp_context_t *ctx, lisp_value_ref_t function,
   return 0;
 }
 
+static struct lisp_variable_store *
+lisp_find_or_create_variable (lisp_context_t *ctx, lisp_value_ref_t name)
+{
+  struct lisp_variable_store *store;
+  struct lisp_variable *var;
+
+  store = lisp_context_find_variable (ctx, name);
+  if (store)
+    return store;
+
+  store = lisp_variable_store_new (ctx);
+  if (!store)
+    return NULL;
+
+  var = lisp_malloc (ctx, sizeof (*var));
+  if (!var)
+    goto fail;
+
+  var->name = lisp_dup_value (ctx, name);
+  var->store = lisp_variable_store_ref (ctx, store);
+
+  list_add (&var->list, &ctx->var_list);
+  return store;
+
+fail:
+  lisp_variable_store_unref (ctx, store);
+  return NULL;
+}
+
 static int
 lisp_set_value_in_context (lisp_context_t *ctx, lisp_value_t name,
                            lisp_value_t value)
 {
-  struct lisp_variable *var;
+  struct lisp_variable_store *store;
 
   if (LISP_IS_EXCEPTION (name) || LISP_IS_EXCEPTION (value))
     goto fail;
-  var = lisp_malloc (ctx, sizeof (*var));
-  if (!var)
-    goto fail;
-  var->name = name;
-  var->value = value;
 
-  list_add (&var->list, &ctx->var_list);
+  store = lisp_find_or_create_variable (ctx, name);
+  if (!store)
+    goto fail;
+
+
+  lisp_free_value (ctx, store->value);
+  store->value = value;
+
+  lisp_free_value (ctx, name);
+  lisp_variable_store_unref (ctx, store);
 
   return 0;
 
@@ -1769,7 +1795,8 @@ lisp_define_function (lisp_context_t *ctx, lisp_value_t name,
   do                                                                          \
     {                                                                         \
       LISP_DEFINE_SYMBOL (name_symbol, name);                                 \
-      lisp_define_function (context, name_symbol, data, invoker);             \
+      lisp_define_function (context, lisp_dup_value (context, name_symbol),   \
+                            data, invoker);                                   \
     }                                                                         \
   while (0)
 
@@ -1780,8 +1807,6 @@ lisp_new_global_context (lisp_runtime_t *rt)
   lisp_context_t *ctx = lisp_context_new (rt, "<GLOBAL>");
 
   LISP_DEFINE_FUNCTION (ctx, "DEFINE", nil, &lisp_define);
-  LISP_DEFINE_FUNCTION (ctx, "SET", nil, &lisp_set);
-  LISP_DEFINE_FUNCTION (ctx, "SETQ", nil, &lisp_setq);
   LISP_DEFINE_FUNCTION (ctx, "QUOTE", nil, &lisp_quote);
   LISP_DEFINE_FUNCTION (ctx, "+", nil, &lisp_plus);
   LISP_DEFINE_FUNCTION (ctx, "-", nil, &lisp_minus);
@@ -1850,12 +1875,14 @@ lisp_eval (lisp_context_t *ctx, lisp_value_ref_t val)
 
   if (val.tag == LISP_TAG_SYMBOL)
     {
-      struct lisp_variable *var = lisp_context_find_variable (ctx, val);
+      struct lisp_variable_store *var = lisp_context_find_variable (ctx, val);
+      lisp_value_t r;
       if (!var)
         return lisp_throw_internal_error (ctx, "Variable %s not found",
                                           LISP_SYMBOL_STR (val));
-
-      return lisp_dup_value (ctx, var->value);
+      r = lisp_dup_value (ctx, var->value);
+      lisp_variable_store_unref (ctx, var);
+      return r;
     }
 
   return val;
