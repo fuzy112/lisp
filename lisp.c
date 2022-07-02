@@ -21,7 +21,6 @@ struct lisp_object_operations
 
 struct lisp_object
 {
-  struct list_head list;
   long ref_count;
   const struct lisp_object_operations *ops;
 };
@@ -29,7 +28,6 @@ struct lisp_object
 struct lisp_runtime
 {
   long nr_blocks;
-  struct list_head object_list;
   lisp_value_t exception_list;
 };
 
@@ -39,7 +37,6 @@ struct lisp_context
   struct lisp_context *parent;
   struct lisp_runtime *runtime;
 
-  struct list_head object_list;
   struct list_head var_list;
 };
 
@@ -107,7 +104,6 @@ lisp_runtime_new (void)
 {
   lisp_runtime_t *rt = malloc (sizeof (*rt));
   rt->nr_blocks = 0;
-  INIT_LIST_HEAD (&rt->object_list);
   rt->exception_list = lisp_nil ();
   return rt;
 }
@@ -116,7 +112,6 @@ void
 lisp_runtime_free (lisp_runtime_t *rt)
 {
   assert (rt->nr_blocks == 0);
-  assert (list_empty (&rt->object_list));
   free (rt);
 }
 
@@ -158,7 +153,6 @@ lisp_context_new (lisp_runtime_t *rt, const char *name)
   lisp_context_t *ctx = lisp_malloc_rt (rt, sizeof (*ctx));
   if (!ctx)
     return NULL;
-  INIT_LIST_HEAD (&ctx->object_list);
   INIT_LIST_HEAD (&ctx->var_list);
   ctx->parent = NULL;
   ctx->runtime = rt;
@@ -178,24 +172,6 @@ lisp_context_free (lisp_context_t *ctx)
     list_del (&var->list);
     lisp_free (ctx, var);
   }
-
-  assert (list_empty (&ctx->object_list));
-
-  if (!list_empty (&ctx->object_list))
-    {
-      if (ctx->parent)
-        {
-          list_splice (&ctx->object_list, &ctx->parent->object_list);
-        }
-      else if (ctx->runtime)
-        {
-          list_splice (&ctx->object_list, &ctx->runtime->object_list);
-        }
-      else
-        {
-          assert (0 && "unreachable");
-        }
-    }
 
   lisp_free_rt (ctx->runtime, ctx->name);
 
@@ -297,8 +273,6 @@ lisp_free_value (lisp_context_t *ctx, lisp_value_t val)
       obj->ref_count--;
       if (obj->ref_count == 0)
         {
-          list_del_init (&obj->list);
-
           if (obj->ops->free)
             {
               obj->ops->free (ctx, obj);
@@ -461,7 +435,6 @@ lisp_new_cons (lisp_context_t *ctx, lisp_value_t car, lisp_value_t cdr)
   cons->car = car;
   cons->cdr = cdr;
 
-  list_add_tail (&cons->obj.list, &ctx->object_list);
   {
     lisp_value_t val = LISP_OBJECT (LISP_TAG_LIST, cons);
     return val;
@@ -530,7 +503,6 @@ lisp_new_symbol_full (lisp_context_t *ctx, const char *name, int is_static)
   sym->is_static = is_static;
   sym->name = lisp_toupper (ctx, name);
 
-  list_add_tail (&sym->obj.list, &ctx->object_list);
   sym->obj.ref_count = 1;
   sym->obj.ops = &lisp_symbol_operations;
 
@@ -545,7 +517,7 @@ lisp_new_symbol (lisp_context_t *ctx, const char *name)
 
 #define LISP_SYMBOL_OBJECT_INIT(name, value)                                  \
   {                                                                           \
-    { LIST_HEAD_INIT ((name).obj.list), 1, &lisp_static_symbol_operations },  \
+    { 1, &lisp_static_symbol_operations },  \
         1, (char *)(value)                                                    \
   }
 
@@ -614,7 +586,6 @@ lisp_new_string_full (lisp_context_t *ctx, const char *s, int is_static)
   str->str = lisp_strdup (ctx, s);
   str->obj.ops = &lisp_string_operations;
   str->obj.ref_count = 1;
-  list_add_tail (&str->obj.list, &ctx->object_list);
   return val;
 }
 
@@ -639,7 +610,7 @@ lisp_new_string_len (lisp_context_t *ctx, const char *n, size_t len)
 
 #define LISP_STRING_OBJECT_INIT(name, value)                                  \
   {                                                                           \
-    { LIST_HEAD_INIT ((name).obj.list), 1, &lisp_static_string_operations },  \
+    { 1, &lisp_static_string_operations },  \
         1, (char *)(value)                                                    \
   }
 
@@ -1032,7 +1003,7 @@ lisp_do_next_token (struct lisp_reader *reader)
       string_buf_append_char (&reader->buf, ch);
       while ((ch = getc (reader->filep)) != EOF)
         {
-          if (isalnum (ch) || strchr ("+-*/%^><=!&?", ch))
+          if (isalnum (ch) || !!strchr ("+-*/%^><=!&?", ch))
             string_buf_append_char (&reader->buf, ch);
           else if (isspace (ch))
             break;
@@ -1363,8 +1334,6 @@ lisp_new_function (lisp_context_t *ctx, lisp_value_t params, lisp_value_t body,
   lisp_resolve_variables_in_body (ctx, &fn->ctx->var_list, fn->params,
                                   fn->body);
 
-  list_add_tail (&fn->obj.list, &ctx->object_list);
-
   return val;
 }
 
@@ -1395,7 +1364,6 @@ lisp_function_proxy_new (lisp_context_t *ctx, struct lisp_function *func)
   proxy->func = func;
   proxy->obj.ref_count = 1;
   proxy->obj.ops = &lisp_function_proxy_operations;
-  list_add (&proxy->obj.list, &ctx->object_list);
 
   return val;
 }
@@ -1788,12 +1756,11 @@ list_length (struct list_head *head)
 static int
 lisp_do_dump_context (lisp_context_t *ctx)
 {
-  long long nr_objects = list_length (&ctx->object_list);
   long long nr_variables = list_length (&ctx->var_list);
 
-  printf ("context [ name = %s, nr_objects: %lld, "
+  printf ("context [ name = %s, "
           "nr_variables: %lld ]\n",
-          ctx->name, nr_objects, nr_variables);
+          ctx->name, nr_variables);
   return 0;
 }
 
