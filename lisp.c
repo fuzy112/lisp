@@ -1,4 +1,5 @@
 #include "lisp.h"
+#include "hashtable.h"
 #include "list.h"
 #include "string_buf.h"
 
@@ -10,6 +11,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#define LISP_VAR_TABLE_BITS 8
 
 struct lisp_object;
 
@@ -37,7 +40,7 @@ struct lisp_context
   struct lisp_context *parent;
   struct lisp_runtime *runtime;
 
-  struct list_head var_list;
+  DECLARE_HASHTABLE (var_table, LISP_VAR_TABLE_BITS);
 };
 
 struct lisp_function;
@@ -86,7 +89,7 @@ struct lisp_variable_store
 
 struct lisp_variable
 {
-  struct list_head list;
+  struct hlist_node node;
 
   lisp_value_t name;
   struct lisp_variable_store *store;
@@ -153,7 +156,7 @@ lisp_context_new (lisp_runtime_t *rt, const char *name)
   lisp_context_t *ctx = lisp_malloc_rt (rt, sizeof (*ctx));
   if (!ctx)
     return NULL;
-  INIT_LIST_HEAD (&ctx->var_list);
+  hash_init (ctx->var_table);
   ctx->parent = NULL;
   ctx->runtime = rt;
   ctx->name = lisp_strdup_rt (rt, name);
@@ -163,13 +166,15 @@ lisp_context_new (lisp_runtime_t *rt, const char *name)
 void
 lisp_context_free (lisp_context_t *ctx)
 {
-  struct lisp_variable *var, *tmp_var;
+  struct lisp_variable *var;
+  struct hlist_node *tmp;
+  size_t bkt;
 
-  list_for_each_entry_safe (var, tmp_var, &ctx->var_list, list)
+  hash_for_each_safe (ctx->var_table, bkt, tmp, var, node)
   {
     lisp_free_value (ctx, var->name);
     lisp_variable_store_unref (ctx, var->store);
-    list_del (&var->list);
+    hash_del(&var->node);
     lisp_free (ctx, var);
   }
 
@@ -517,8 +522,7 @@ lisp_new_symbol (lisp_context_t *ctx, const char *name)
 
 #define LISP_SYMBOL_OBJECT_INIT(name, value)                                  \
   {                                                                           \
-    { 1, &lisp_static_symbol_operations },  \
-        1, (char *)(value)                                                    \
+    { 1, &lisp_static_symbol_operations }, 1, (char *)(value)                 \
   }
 
 #define LISP_DEFINE_SYMBOL_OBJECT(name, value)                                \
@@ -610,8 +614,7 @@ lisp_new_string_len (lisp_context_t *ctx, const char *n, size_t len)
 
 #define LISP_STRING_OBJECT_INIT(name, value)                                  \
   {                                                                           \
-    { 1, &lisp_static_string_operations },  \
-        1, (char *)(value)                                                    \
+    { 1, &lisp_static_string_operations }, 1, (char *)(value)                 \
   }
 
 #define LISP_DEFINE_STRING_OBJECT(name, value)                                \
@@ -1136,12 +1139,33 @@ lisp_to_int32 (lisp_context_t *ctx, int32_t *result, lisp_value_ref_t val)
   return 0;
 }
 
+static uint32_t
+lisp_hash_str (const char *s)
+{
+  const uint32_t p = 31;
+  const uint32_t m = 1e9 + 9;
+  uint32_t p_pow = 1;
+  uint32_t val = 0;
+  size_t i;
+  size_t len = strlen (s);
+
+  for (i = 0; i < len; ++i)
+    {
+      val = (val + s[i] * p_pow) % m;
+      p_pow = p_pow * p % m;
+    }
+
+  return val;
+}
+
 static struct lisp_variable_store *
 lisp_context_find_variable (lisp_context_t *ctx, lisp_value_ref_t name)
 {
   struct lisp_variable *var;
+  uint32_t key;
 
-  list_for_each_entry (var, &ctx->var_list, list)
+  key = lisp_hash_str (LISP_SYMBOL_STR (name));
+  hash_for_each_possible (ctx->var_table, var, node, key)
   {
     if (lisp_sym_eq (var->name, name))
       return lisp_variable_store_ref (ctx, var->store);
@@ -1236,11 +1260,12 @@ lisp_list_contains_symbol (lisp_context_t *ctx, lisp_value_ref_t list,
 }
 
 static unsigned
-lisp_var_list_contains (struct list_head *var_list, lisp_value_ref_t name)
+lisp_var_list_contains (lisp_context_t *ctx, lisp_value_ref_t name)
 {
+  size_t bkt;
   struct lisp_variable *var;
 
-  list_for_each_entry (var, var_list, list)
+  hash_for_each (ctx->var_table, bkt, var, node)
   {
     if (lisp_sym_eq (var->name, name))
       return 1;
@@ -1250,8 +1275,7 @@ lisp_var_list_contains (struct list_head *var_list, lisp_value_ref_t name)
 }
 
 static int
-lisp_resolve_variables_in_expr (lisp_context_t *ctx,
-                                struct list_head *var_list,
+lisp_resolve_variables_in_expr (lisp_context_t *ctx, lisp_context_t *new_ctx,
                                 lisp_value_ref_t params, lisp_value_ref_t expr)
 {
   int res = 0;
@@ -1262,7 +1286,7 @@ lisp_resolve_variables_in_expr (lisp_context_t *ctx,
       while (!LISP_IS_NIL (expr))
         {
           lisp_value_t car = lisp_car (ctx, expr);
-          res += lisp_resolve_variables_in_expr (ctx, var_list, params, car);
+          res += lisp_resolve_variables_in_expr (ctx, new_ctx, params, car);
           lisp_free_value (ctx, car);
           expr = lisp_cdr_take (ctx, expr);
         }
@@ -1274,7 +1298,7 @@ lisp_resolve_variables_in_expr (lisp_context_t *ctx,
       if (lisp_list_contains_symbol (ctx, params, expr))
         return 0;
 
-      if (lisp_var_list_contains (var_list, expr))
+      if (lisp_var_list_contains (new_ctx, expr))
         return 0;
 
       {
@@ -1287,7 +1311,8 @@ lisp_resolve_variables_in_expr (lisp_context_t *ctx,
         var = lisp_malloc (ctx, sizeof (*var));
         var->name = lisp_dup_value (ctx, expr);
         var->store = store;
-        list_add (&var->list, var_list);
+
+        hash_add (new_ctx->var_table, &var->node, lisp_hash_str (LISP_SYMBOL_STR(var->name)));
         return 0;
       }
     }
@@ -1296,8 +1321,7 @@ lisp_resolve_variables_in_expr (lisp_context_t *ctx,
 }
 
 static int
-lisp_resolve_variables_in_body (lisp_context_t *ctx,
-                                struct list_head *var_list,
+lisp_resolve_variables_in_body (lisp_context_t *ctx, lisp_context_t *new_ctx,
                                 lisp_value_ref_t params, lisp_value_ref_t body)
 {
   int res = 0;
@@ -1305,7 +1329,7 @@ lisp_resolve_variables_in_body (lisp_context_t *ctx,
   while (!LISP_IS_NIL (body))
     {
       lisp_value_t exp = lisp_car (ctx, body);
-      res += lisp_resolve_variables_in_expr (ctx, var_list, params, exp);
+      res += lisp_resolve_variables_in_expr (ctx, new_ctx, params, exp);
       lisp_free_value (ctx, exp);
       body = lisp_cdr_take (ctx, body);
     }
@@ -1331,8 +1355,7 @@ lisp_new_function (lisp_context_t *ctx, lisp_value_t params, lisp_value_t body,
 
   fn->ctx
       = lisp_context_new (lisp_get_runtime (ctx), LISP_SYMBOL_STR (fn->name));
-  lisp_resolve_variables_in_body (ctx, &fn->ctx->var_list, fn->params,
-                                  fn->body);
+  lisp_resolve_variables_in_body (ctx, fn->ctx, fn->params, fn->body);
 
   return val;
 }
@@ -1409,7 +1432,8 @@ lisp_find_or_create_variable (lisp_context_t *ctx, lisp_value_ref_t name)
   var->name = lisp_dup_value (ctx, name);
   var->store = lisp_variable_store_ref (ctx, store);
 
-  list_add (&var->list, &ctx->var_list);
+  hash_add (ctx->var_table, &var->node, lisp_hash_str (LISP_SYMBOL_STR (name)));
+
   return store;
 
 fail:
@@ -1756,7 +1780,7 @@ list_length (struct list_head *head)
 static int
 lisp_do_dump_context (lisp_context_t *ctx)
 {
-  long long nr_variables = list_length (&ctx->var_list);
+  long long nr_variables = -1; //list_length (&ctx->var_list);
 
   printf ("context [ name = %s, "
           "nr_variables: %lld ]\n",
