@@ -6,24 +6,21 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-int
+static int
 repl ()
 {
-  char *line = NULL;
-  size_t n = 0;
-  size_t len = 0;
-
   lisp_runtime_t *rt = lisp_runtime_new ();
   lisp_context_t *ctx = lisp_new_global_context (rt);
+  lisp_reader_t *reader = lisp_reader_new (ctx, stdin);
 
   lisp_value_t exp;
   lisp_value_t val;
 
-  while ((len = getline (&line, &n, stdin)) != 0)
+  fprintf (stderr, ">>> ");
+  while (!feof (stdin))
     {
-      if (len < 2)
-        break;
-      exp = lisp_parse (ctx, (const char **)&line);
+      exp = lisp_read_form (reader);
+      lisp_print_value (ctx, exp);
       val = lisp_eval (ctx, exp);
       if (LISP_IS_EXCEPTION (val))
         lisp_print_exception (ctx);
@@ -31,26 +28,30 @@ repl ()
         lisp_print_value (ctx, val);
       lisp_free_value (ctx, val);
       lisp_free_value (ctx, exp);
+
+      fprintf (stderr, ">>> ");
     }
 
+  lisp_reader_free (reader);
   lisp_context_free (ctx);
   lisp_runtime_free (rt);
 
   return 0;
 }
 
-int
-interpreter (const char *text, char **args)
+static int
+interpreter (FILE *filep, char **args)
 {
   lisp_runtime_t *rt = lisp_runtime_new ();
   lisp_context_t *ctx = lisp_new_global_context (rt);
+  lisp_reader_t *reader = lisp_reader_new (ctx, filep);
 
   (void)args;
 
-  while (text)
+  while (!feof (filep))
     {
       lisp_value_t val;
-      lisp_value_t expr = lisp_parse (ctx, &text);
+      lisp_value_t expr = lisp_read_form (reader);
       if (LISP_IS_EXCEPTION (expr))
         goto fail;
 
@@ -62,6 +63,7 @@ interpreter (const char *text, char **args)
       lisp_free_value (ctx, val);
     }
 
+  lisp_reader_free (reader);
   lisp_context_free (ctx);
   lisp_runtime_free (rt);
 
@@ -69,6 +71,8 @@ interpreter (const char *text, char **args)
 
 fail:
   lisp_print_exception (ctx);
+
+  lisp_reader_free (reader);
 
   lisp_context_free (ctx);
   lisp_runtime_free (rt);
@@ -85,40 +89,13 @@ main (int argc, char **argv)
     }
 
   {
-    struct stat statb;
-    char *text;
     int res;
-    int fd;
+    FILE *filep = fopen (argv[1], "r");
+    if (!filep)
+      return 1;
 
-    if (stat (argv[1], &statb))
-      {
-        perror ("stat");
-        return 1;
-      }
-
-    text = malloc (statb.st_size + 1);
-    if (!text)
-      {
-        perror ("malloc");
-        return 1;
-      }
-
-    fd = open (argv[1], O_RDONLY | O_CLOEXEC);
-    if (fd < 0)
-      {
-        perror ("open");
-        return 1;
-      }
-    if (read (fd, text, statb.st_size) < 0)
-      {
-        perror ("read");
-        return 1;
-      }
-    close (fd);
-    text[statb.st_size] = '\0';
-
-    res = interpreter (text, argv + 1);
-    free (text);
+    res = interpreter (filep, argv);
+    fclose (filep);
 
     return res;
   }

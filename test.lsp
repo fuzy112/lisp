@@ -1,6 +1,3 @@
-(define #t (null? ()))
-(define #f ())
-
 (define (fib n)
 	(if (< n 2)
 		n
@@ -32,7 +29,7 @@
 (print (null? ()))
 (if (null? ()) (print 1) (print 2))
 
-(define (my_cdr lst)
+(define (my-cdr lst)
 	(print lst)
 	(cdr lst)
 	)

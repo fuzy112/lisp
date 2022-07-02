@@ -1,5 +1,6 @@
 #include "lisp.h"
 #include "list.h"
+#include "string_buf.h"
 
 #include <assert.h>
 #include <ctype.h>
@@ -57,12 +58,16 @@ struct lisp_function
   lisp_native_invoke_t invoker;
 
   lisp_value_t name;
+
+  lisp_context_t *ctx;
 };
 
 static void
 lisp_function_free (lisp_context_t *ctx, struct lisp_object *obj)
 {
   struct lisp_function *func = (struct lisp_function *)obj;
+
+  lisp_context_free (func->ctx);
 
   lisp_free_value (ctx, func->params);
   lisp_free_value (ctx, func->body);
@@ -173,6 +178,8 @@ lisp_context_free (lisp_context_t *ctx)
     list_del (&var->list);
     lisp_free (ctx, var);
   }
+
+  assert (list_empty (&ctx->object_list));
 
   if (!list_empty (&ctx->object_list))
     {
@@ -338,42 +345,6 @@ lisp_cons_free (lisp_context_t *ctx, struct lisp_object *obj)
   lisp_free_value (ctx, cons->car);
   lisp_free (ctx, cons);
   lisp_free_value (ctx, tmp);
-}
-
-struct string_buf
-{
-  char *s;
-  size_t capacity;
-  size_t length;
-};
-
-static int
-string_buf_append (struct string_buf *buf, const char *str, size_t len)
-{
-  char *tmp;
-
-  while (buf->length + len >= buf->capacity)
-    {
-      if (buf->capacity == 0)
-        {
-          buf->capacity = len + 1;
-        }
-      else
-        {
-          buf->capacity = 2 * buf->capacity;
-        }
-    }
-
-  tmp = realloc (buf->s, buf->capacity);
-  if (!tmp)
-    return -1;
-  buf->s = tmp;
-
-  memcpy (buf->s + buf->length, str, len);
-  buf->length += len;
-  buf->s[buf->length] = '\0';
-
-  return 0;
 }
 
 static lisp_value_t
@@ -653,6 +624,19 @@ lisp_new_string (lisp_context_t *ctx, const char *s)
   return lisp_new_string_full (ctx, s, 0);
 }
 
+lisp_value_t
+lisp_new_string_len (lisp_context_t *ctx, const char *n, size_t len)
+{
+  lisp_value_t val;
+  char *s = strndup (n, len);
+  if (!s)
+    return lisp_throw_out_of_memory (ctx);
+
+  val = lisp_new_string (ctx, s);
+  free (s);
+  return val;
+}
+
 #define LISP_STRING_OBJECT_INIT(name, value)                                  \
   {                                                                           \
     { LIST_HEAD_INIT ((name).obj.list), 1, &lisp_static_string_operations },  \
@@ -683,20 +667,49 @@ lisp_throw_out_of_memory (lisp_context_t *ctx)
 }
 
 lisp_value_t
-lisp_throw_internal_error (lisp_context_t *ctx, const char *fmt, ...)
+lisp_throw_internal_error_v (lisp_context_t *ctx, const char *fmt, va_list ap)
 {
   char buffer[500];
+  vsnprintf (buffer, sizeof (buffer), fmt, ap);
+  return lisp_throw (ctx, lisp_new_string (ctx, buffer));
+}
+
+lisp_value_t
+lisp_throw_internal_error (lisp_context_t *ctx, const char *fmt, ...)
+{
   va_list ap;
-  lisp_value_t err_msg;
 
   assert (fmt != NULL);
 
   va_start (ap, fmt);
-  vsnprintf (buffer, sizeof (buffer), fmt, ap);
+  lisp_throw_internal_error_v (ctx, fmt, ap);
   va_end (ap);
 
-  err_msg = lisp_new_string (ctx, buffer);
-  return lisp_throw (ctx, err_msg);
+  return lisp_exception ();
+}
+
+enum lisp_parse_error
+{
+  LISP_PE_EOF = 1,
+  LISP_PE_EARLY_EOF = 2,
+  LISP_PE_EXPECT_RIGHT_PAREN = 3,
+  LISP_PE_INVALID_NUMBER_LITERAL = 4,
+  LISP_PE_INVALID_BOOLEAN_LITERAL = 5,
+  LISP_PE_INVALID_TOKEN = 6,
+};
+
+lisp_value_t
+lisp_throw_parse_error (lisp_context_t *ctx, enum lisp_parse_error code,
+                        const char *fmt, ...)
+{
+  va_list ap;
+  (void)code;
+
+  va_start (ap, fmt);
+  lisp_throw_internal_error_v (ctx, fmt, ap);
+  va_end (ap);
+
+  return lisp_exception ();
 }
 
 lisp_value_t
@@ -722,152 +735,357 @@ lisp_print_exception (lisp_context_t *ctx)
 
 #define LISP_SYMBOL_STR(sym) (((struct lisp_symbol *)(sym).ptr)->name)
 
-static char *
-skipws (const char *text)
+enum lisp_reader_state
 {
-  if (!text)
-    return NULL;
+  LISP_RS_PEEK,
+  LISP_RS_NEXT,
+};
 
-  while (*text && isspace (*text))
-    ++text;
-
-  if (*text)
-    return (char *)text;
-  return NULL;
+inline static unsigned
+streq (const char *a, const char *b)
+{
+  return strcmp (a, b) == 0;
 }
 
-static lisp_value_t
-lisp_parse_atom (lisp_context_t *ctx, const char **text)
+struct lisp_reader
 {
-  if (isdigit ((*text)[0]))
-    {
-      long n;
-      char *endptr = NULL;
+  lisp_context_t *ctx;
+  FILE *filep;
 
-      errno = 0;
-      n = strtol (*text, &endptr, 0);
-      assert (errno == 0);
-      *text = endptr;
+  int state;
+  char *token;
 
-      {
-        lisp_value_t val = LISP_INT32 (n);
-        return val;
-      }
-    }
+  struct string_buf buf;
+};
 
-  if (isalpha ((*text)[0]) || strchr ("#+-*/%<>=!&|^_?:", **text) != NULL)
-    {
-      size_t pos = strcspn (*text, " \t\n\r\f)");
-      char *sym = strndup (*text, pos);
-      lisp_value_t val = lisp_new_symbol (ctx, sym);
-      *text += pos;
+static const char *lisp_next_token (struct lisp_reader *reader);
 
-      free (sym);
-      return val;
-    }
+static const char *lisp_peek_token (struct lisp_reader *reader);
 
-  if (**text == '\"')
-    {
-      size_t pos = 1;
-      do
-        {
-          pos += strcspn (*text + pos, "\"");
-        }
-      while ((*text)[pos - 1] == '\\');
+static lisp_value_t lisp_read_atom (struct lisp_reader *reader);
 
-      {
-        char *str = strndup (*text + 1, pos - 1);
-        lisp_value_t val = lisp_new_string (ctx, str);
-        *text += pos;
-        free (str);
-        return val;
-      }
-    }
+static lisp_value_t lisp_read_list (struct lisp_reader *reader);
 
-  return lisp_throw_internal_error (ctx, "Syntax error");
+void
+lisp_reader_init (struct lisp_reader *reader, lisp_context_t *ctx)
+{
+  reader->filep = stdin;
+  reader->ctx = ctx;
+  reader->state = LISP_RS_NEXT;
+  reader->token = NULL;
+  reader->buf.s = NULL;
+  reader->buf.capacity = 0;
+  reader->buf.length = 0;
 }
 
-static lisp_value_t
-lisp_parse_sexpr (lisp_context_t *ctx, const char **text)
+void
+lisp_reader_destroy (struct lisp_reader *reader)
 {
-  lisp_value_t val = LISP_NIL;
+  free (reader->buf.s);
+}
 
-  *text = skipws (*text);
+lisp_reader_t *
+lisp_reader_new (lisp_context_t *ctx, FILE *filep)
+{
+  lisp_reader_t *reader = lisp_malloc (ctx, sizeof (*reader));
+  if (!reader)
+    return reader;
 
-  if (!*text)
-    return lisp_throw_internal_error (ctx, "Unexpected end of file");
-  if (**text == ')')
-    {
-      ++*text;
-      return val;
-    }
-  val = lisp_parse (ctx, text);
-  if (LISP_IS_EXCEPTION (val))
-    return lisp_exception ();
+  lisp_reader_init (reader, ctx);
+  reader->filep = filep;
+  return reader;
+}
 
-  if (!*text)
-    return lisp_throw_internal_error (ctx, "Unexpected end of file");
-  *text = skipws (*text);
-
-  if (!*text)
-    return lisp_throw_internal_error (ctx, "Unexpected end of file");
-  if (**text == ')')
-    {
-      lisp_value_t nil = LISP_NIL;
-      ++*text;
-      return lisp_new_cons (ctx, val, nil);
-    }
-  else if (**text == '.')
-    {
-      lisp_value_t cdr;
-      ++*text;
-      cdr = lisp_parse (ctx, text);
-      if (LISP_IS_EXCEPTION (cdr))
-        return lisp_exception ();
-      if (!*text)
-        return lisp_throw_internal_error (ctx, "Unexpected end of file");
-      *text = skipws (*text);
-      if (**text != ')')
-        {
-          lisp_free_value (ctx, cdr);
-          return lisp_throw_internal_error (
-              ctx, "Syntax error: expecting ')' but got %c", **text);
-        }
-      ++*text;
-      return lisp_new_cons (ctx, val, cdr);
-    }
-  else
-    {
-      lisp_value_t cdr;
-      cdr = lisp_parse_sexpr (ctx, text);
-      if (LISP_IS_EXCEPTION (cdr))
-        return lisp_exception ();
-      return lisp_new_cons (ctx, val, cdr);
-    }
+void
+lisp_reader_free (lisp_reader_t *reader)
+{
+  lisp_context_t *ctx = reader->ctx;
+  lisp_reader_destroy (reader);
+  lisp_free (ctx, reader);
 }
 
 lisp_value_t
-lisp_parse (lisp_context_t *ctx, const char **text)
+lisp_read_form (struct lisp_reader *reader)
 {
-  *text = skipws (*text);
-  if (!*text)
+  const char *token;
+
+  token = lisp_peek_token (reader);
+  if (!token)
+    return lisp_throw_parse_error (reader->ctx, LISP_PE_EOF, "EOF");
+
+  if (streq (token, "("))
+    return lisp_read_list (reader);
+
+  if (streq (token, ")"))
+    return lisp_throw_parse_error (reader->ctx, LISP_PE_EXPECT_RIGHT_PAREN,
+                                   "Unexpected ')'");
+
+  if (streq (token, "'"))
     {
-      *text = NULL;
-      return lisp_nil ();
+      LISP_DEFINE_SYMBOL (symbol_quote, "QUOTE");
+      lisp_next_token (reader);
+      lisp_value_t quoted = lisp_read_form (reader);
+      if (LISP_IS_EXCEPTION (quoted))
+        return lisp_exception ();
+      return lisp_new_cons (reader->ctx,
+                            lisp_dup_value (reader->ctx, symbol_quote),
+                            lisp_new_cons (reader->ctx, quoted, lisp_nil ()));
     }
-  if ((*text)[0] == '(')
+
+  return lisp_read_atom (reader);
+}
+
+lisp_value_t
+lisp_read_list (struct lisp_reader *reader)
+{
+  const char *token;
+  lisp_value_t val = LISP_NIL;
+  lisp_value_t *tail = &val;
+
+  token = lisp_next_token (reader);
+  assert (streq (token, "("));
+
+  for (;;)
     {
-      ++*text;
-      return lisp_parse_sexpr (ctx, text);
+      lisp_value_t form;
+      token = lisp_peek_token (reader);
+      if (!token)
+        {
+          lisp_throw_parse_error (reader->ctx, LISP_PE_EARLY_EOF,
+                                  "Unexpected eof when parsing list");
+          goto fail;
+        }
+
+      if (streq (token, ")"))
+        break;
+
+      if (streq (token, "."))
+        {
+          lisp_next_token (reader);
+          *tail = lisp_read_form (reader);
+          if (LISP_IS_EXCEPTION (*tail))
+            goto fail;
+          token = lisp_next_token (reader);
+          if (!streq (token, ")"))
+            {
+              lisp_throw_parse_error (reader->ctx, LISP_PE_EXPECT_RIGHT_PAREN,
+                                      "expected ')' but got '%s'", token);
+              goto fail;
+            }
+          return val;
+        }
+
+      form = lisp_read_form (reader);
+      if (LISP_IS_EXCEPTION (form))
+        goto fail;
+
+      *tail = lisp_new_cons (reader->ctx, form, lisp_nil ());
+      tail = &((struct lisp_cons *)tail->ptr)->cdr;
     }
-  if ((*text)[0] == '\'')
+
+  lisp_next_token (reader); // eat ')'
+  return val;
+
+fail:
+  lisp_free_value (reader->ctx, val);
+  return lisp_exception ();
+}
+
+static const char *
+strend (const char *s)
+{
+  size_t len = strlen (s);
+  return s + len;
+}
+
+lisp_value_t
+lisp_read_atom (struct lisp_reader *reader)
+{
+  const char *token = lisp_next_token (reader);
+
+  assert (!!token);
+  assert (!streq (token, "("));
+  assert (!streq (token, ")"));
+
+  if (isdigit (token[0]))
     {
-      *text += 1;
-      return lisp_new_cons (
-          ctx, lisp_new_symbol (ctx, "quote"),
-          lisp_new_cons (ctx, lisp_parse (ctx, text), lisp_nil ()));
+      if (strchr (token, '.'))
+        {
+          char *endptr = NULL;
+          double n = strtod (token, &endptr);
+          if (endptr != strend (token))
+            return lisp_throw_parse_error (
+                reader->ctx, LISP_PE_INVALID_NUMBER_LITERAL,
+                "invalid number literal: %s", token);
+          return lisp_new_real (reader->ctx, n);
+        }
+      else
+        {
+          char *endptr = NULL;
+          long n = strtol (token, &endptr, 0);
+          if (endptr != strend (token))
+            return lisp_throw_parse_error (
+                reader->ctx, LISP_PE_INVALID_NUMBER_LITERAL,
+                "invalid number literal: %s", token);
+          return lisp_new_int32 (reader->ctx, n);
+        }
     }
-  return lisp_parse_atom (ctx, text);
+
+  if (token[0] == '"')
+    return lisp_new_string_len (reader->ctx, token + 1, strlen (token) - 2);
+
+  if (token[0] == '#')
+    {
+      if (strlen (token) != 2
+          || (toupper (token[1]) != 'T' && toupper (token[1]) != 'F'))
+        return lisp_throw_parse_error (reader->ctx,
+                                       LISP_PE_INVALID_BOOLEAN_LITERAL,
+                                       "Invalid boolean: %s", token);
+      if (toupper (token[1]) == 'T')
+        return lisp_true ();
+      else
+        return lisp_false ();
+    }
+
+  return lisp_new_symbol (reader->ctx, token);
+}
+
+/*
+  space and comma
+  symbol
+*/
+#define LISP_TOKEN_PATTERN                                                    \
+  "\\s|([a-zA-Z*+/-%?<>=!&][a-zA-Z0-9*+/"                                     \
+  "-%?<>=!&]*|\\(|\\)|(+|-)([1-9][0-9]*|0)|\\.|')"
+
+static int
+lisp_do_next_token (struct lisp_reader *reader)
+{
+  int ch;
+
+  reader->buf.length = 0;
+
+  while ((ch = getc (reader->filep)) != EOF)
+    {
+      if (!isspace (ch))
+        break;
+    }
+
+  switch (ch)
+    {
+    case EOF:
+      reader->token = NULL;
+      return 0;
+
+    case '(':
+      reader->token = "(";
+      return 0;
+
+    case ')':
+      reader->token = ")";
+      return 0;
+
+    case '\'':
+      reader->token = "'";
+      return 0;
+
+    case '.':
+      reader->token = ".";
+      return 0;
+
+    case '0' ... '9':
+      string_buf_append_char (&reader->buf, ch);
+      while ((ch = getc (reader->filep)) != EOF)
+        if (isdigit (ch))
+          string_buf_append_char (&reader->buf, ch);
+        else if (isspace (ch))
+          break;
+        else if (ch == ')')
+          {
+            ungetc (ch, reader->filep);
+            break;
+          }
+        else
+          {
+            reader->token = NULL;
+            return LISP_PE_INVALID_TOKEN;
+          }
+
+      reader->token = reader->buf.s;
+      return 0;
+
+    case 'a' ... 'z':
+    case 'A' ... 'Z':
+    case '+':
+    case '-':
+    case '*':
+    case '/':
+    case '%':
+    case '^':
+    case '>':
+    case '<':
+    case '=':
+    case '!':
+    case '?':
+    case '&':
+    case '#':
+      string_buf_append_char (&reader->buf, ch);
+      while ((ch = getc (reader->filep)) != EOF)
+        {
+          if (isalnum (ch) || strchr ("+-*/%^><=!&?", ch))
+            string_buf_append_char (&reader->buf, ch);
+          else if (isspace (ch))
+            break;
+          else if (ch == ')')
+            {
+              ungetc (ch, reader->filep);
+              break;
+            }
+          else
+            {
+              reader->token = NULL;
+              return LISP_PE_INVALID_TOKEN;
+            }
+        }
+      reader->token = reader->buf.s;
+      return 0;
+
+    default:
+      fprintf (stderr, "invalid char: %o\n", ch);
+      reader->token = NULL;
+      return LISP_PE_INVALID_TOKEN;
+    }
+}
+
+static const char *
+lisp_next_token (struct lisp_reader *reader)
+{
+  if (reader->state == LISP_RS_PEEK)
+    {
+      reader->state = LISP_RS_NEXT;
+      return reader->token;
+    }
+  else
+    {
+      lisp_do_next_token (reader);
+      return reader->token;
+    }
+}
+
+static const char *
+lisp_peek_token (struct lisp_reader *reader)
+{
+  if (reader->state == LISP_RS_NEXT)
+    {
+      lisp_do_next_token (reader);
+
+      reader->state = LISP_RS_PEEK;
+      return reader->token;
+    }
+  else
+    {
+      return reader->token;
+    }
 }
 
 char *
@@ -966,100 +1184,46 @@ lisp_context_find_variable (lisp_context_t *ctx, lisp_value_ref_t name)
   return NULL;
 }
 
-/**
- * (set var1 value1
- *       [var2 value2
- *        ...])
- */
-static lisp_value_t
-lisp_setq (lisp_context_t *ctx, lisp_value_ref_t params,
-           struct lisp_function *unused)
-{
-  (void)unused;
-  lisp_value_t nil = LISP_NIL;
-  lisp_value_t tmp;
-
-  lisp_value_t name;
-  lisp_value_t value_exp;
-  lisp_value_t value;
-
-  struct lisp_variable *var;
-
-  LIST_HEAD (var_list);
-
-  lisp_dup_value (ctx, params);
-  while (!LISP_IS_NIL (params))
-    {
-      name = lisp_car (ctx, params);
-      tmp = lisp_cdr (ctx, params);
-      value_exp = lisp_car (ctx, tmp);
-      value = lisp_eval (ctx, value_exp);
-
-      var = lisp_malloc (ctx, sizeof (*var));
-      var->name = name;
-      var->store = lisp_variable_store_new (ctx);
-      var->store->value = value;
-
-      lisp_free_value (ctx, value_exp);
-      lisp_free_value (ctx, params);
-      params = lisp_cdr (ctx, tmp);
-      lisp_free_value (ctx, tmp);
-
-      list_add (&var->list, &var_list);
-    }
-  lisp_free_value (ctx, params);
-
-  list_splice (&var_list, &ctx->var_list);
-  return nil;
-}
+static int lisp_set_value_in_context (lisp_context_t *ctx, lisp_value_t name,
+                                      lisp_value_t value);
 
 static int
-lisp_function_set_args (lisp_context_t *ctx, lisp_value_ref_t params,
-                        lisp_value_ref_t args)
+lisp_function_set_args (lisp_context_t *ctx, lisp_context_t *new_ctx,
+                        lisp_value_ref_t params, lisp_value_ref_t args)
 {
-  lisp_value_t list = LISP_NIL;
-
   lisp_dup_value (ctx, params);
   lisp_dup_value (ctx, args);
   while (!LISP_IS_NIL (params))
     {
-      lisp_value_t tmp;
-
-      list = lisp_new_cons (ctx, lisp_car (ctx, args), list);
-      list = lisp_new_cons (ctx, lisp_car (ctx, params), list);
-
-      tmp = lisp_cdr (ctx, params);
-      lisp_free_value (ctx, params);
-      params = tmp;
-
-      tmp = lisp_cdr (ctx, args);
-      lisp_free_value (ctx, args);
-      args = tmp;
+      lisp_value_t name = lisp_car (ctx, params);
+      lisp_value_t expr = lisp_car (ctx, args);
+      lisp_value_t value = lisp_eval (ctx, expr);
+      lisp_free_value (ctx, expr);
+      if (lisp_set_value_in_context (new_ctx, name, value))
+        {
+          lisp_free_value (ctx, args);
+          lisp_free_value (ctx, params);
+          return -1;
+        }
+      params = lisp_cdr_take (ctx, params);
+      args = lisp_cdr_take (ctx, args);
     }
-  lisp_free_value (ctx, args);
-  lisp_free_value (ctx, params);
-
-  lisp_setq (ctx, list, NULL);
-  lisp_free_value (ctx, list);
 
   return 0;
 }
 
 static lisp_value_t
-lisp_eval_list (lisp_context_t *ctx, lisp_value_t list)
+lisp_eval_list (lisp_context_t *ctx, lisp_value_ref_t list)
 {
   lisp_value_t val = LISP_NIL;
   lisp_dup_value (ctx, list);
   while (!LISP_IS_NIL (list))
     {
-      lisp_value_t tmp;
       lisp_value_t exp = lisp_car (ctx, list);
+      list = lisp_cdr_take (ctx, list);
       lisp_free_value (ctx, val);
       val = lisp_eval (ctx, exp);
       lisp_free_value (ctx, exp);
-      tmp = lisp_cdr (ctx, list);
-      lisp_free_value (ctx, list);
-      list = tmp;
     }
   lisp_free_value (ctx, list);
   return val;
@@ -1071,18 +1235,117 @@ lisp_function_invoker (lisp_context_t *ctx, lisp_value_ref_t args,
 {
   lisp_value_t val;
   lisp_context_t *new_ctx
-      = lisp_context_new_with_parent (ctx, LISP_SYMBOL_STR (func->name));
-  lisp_function_set_args (new_ctx, func->params, args);
+      = lisp_context_new_with_parent (func->ctx, LISP_SYMBOL_STR (func->name));
+  lisp_function_set_args (ctx, new_ctx, func->params, args);
   val = lisp_eval_list (new_ctx, func->body);
   lisp_context_free (new_ctx);
   return val;
+}
+
+static unsigned
+lisp_list_contains_symbol (lisp_context_t *ctx, lisp_value_ref_t list,
+                           lisp_value_t elem)
+{
+  unsigned result = 0;
+  lisp_dup_value (ctx, list);
+
+  while (!LISP_IS_NIL (list))
+    {
+      lisp_value_t car = lisp_car (ctx, list);
+      result = lisp_sym_eq (car, elem);
+      lisp_free_value (ctx, car);
+
+      if (result)
+        break;
+      list = lisp_cdr_take (ctx, list);
+    }
+
+  lisp_free_value (ctx, list);
+  return result;
+}
+
+static unsigned
+lisp_var_list_contains (struct list_head *var_list, lisp_value_ref_t name)
+{
+  struct lisp_variable *var;
+
+  list_for_each_entry (var, var_list, list)
+  {
+    if (lisp_sym_eq (var->name, name))
+      return 1;
+  }
+
+  return 0;
+}
+
+static int
+lisp_resolve_variables_in_expr (lisp_context_t *ctx,
+                                struct list_head *var_list,
+                                lisp_value_ref_t params, lisp_value_ref_t expr)
+{
+  int res = 0;
+  if (LISP_IS_LIST (expr))
+    {
+      lisp_dup_value (ctx, expr);
+
+      while (!LISP_IS_NIL (expr))
+        {
+          lisp_value_t car = lisp_car (ctx, expr);
+          res += lisp_resolve_variables_in_expr (ctx, var_list, params, car);
+          lisp_free_value (ctx, car);
+          expr = lisp_cdr_take (ctx, expr);
+        }
+      return res;
+    }
+
+  if (LISP_IS_SYMBOL (expr))
+    {
+      if (lisp_list_contains_symbol (ctx, params, expr))
+        return 0;
+
+      if (lisp_var_list_contains (var_list, expr))
+        return 0;
+
+      {
+        struct lisp_variable *var;
+        struct lisp_variable_store *store
+            = lisp_context_find_variable (ctx, expr);
+        if (!store)
+          return 1;
+
+        var = lisp_malloc (ctx, sizeof (*var));
+        var->name = lisp_dup_value (ctx, expr);
+        var->store = store;
+        list_add (&var->list, var_list);
+        return 0;
+      }
+    }
+
+  return 0;
+}
+
+static int
+lisp_resolve_variables_in_body (lisp_context_t *ctx,
+                                struct list_head *var_list,
+                                lisp_value_ref_t params, lisp_value_ref_t body)
+{
+  int res = 0;
+  lisp_dup_value (ctx, body);
+  while (!LISP_IS_NIL (body))
+    {
+      lisp_value_t exp = lisp_car (ctx, body);
+      res += lisp_resolve_variables_in_expr (ctx, var_list, params, exp);
+      lisp_free_value (ctx, exp);
+      body = lisp_cdr_take (ctx, body);
+    }
+  lisp_free_value (ctx, body);
+  return res;
 }
 
 static lisp_value_t
 lisp_new_function (lisp_context_t *ctx, lisp_value_t params, lisp_value_t body,
                    lisp_native_invoke_t invoker)
 {
-  LISP_DEFINE_SYMBOL (lambda, "#LAMBDA");
   struct lisp_function *fn = lisp_malloc (ctx, sizeof (*fn));
   lisp_value_t val = LISP_OBJECT (LISP_TAG_LAMBDA, fn);
 
@@ -1093,9 +1356,46 @@ lisp_new_function (lisp_context_t *ctx, lisp_value_t params, lisp_value_t body,
   fn->body = body;
   fn->invoker = invoker;
 
-  fn->name = lisp_dup_value (ctx, lambda);
+  fn->name = lisp_new_symbol (ctx, "#LAMBDA");
+
+  fn->ctx
+      = lisp_context_new (lisp_get_runtime (ctx), LISP_SYMBOL_STR (fn->name));
+  lisp_resolve_variables_in_body (ctx, &fn->ctx->var_list, fn->params,
+                                  fn->body);
 
   list_add_tail (&fn->obj.list, &ctx->object_list);
+
+  return val;
+}
+
+struct lisp_function_proxy
+{
+  struct lisp_object obj;
+  struct lisp_function *func;
+};
+
+static void
+lisp_function_proxy_free (lisp_context_t *ctx, struct lisp_object *obj)
+{
+  lisp_free (ctx, obj);
+}
+
+static const struct lisp_object_operations lisp_function_proxy_operations = {
+  .free = lisp_function_proxy_free,
+};
+
+static lisp_value_t
+lisp_function_proxy_new (lisp_context_t *ctx, struct lisp_function *func)
+{
+  struct lisp_function_proxy *proxy = lisp_malloc (ctx, sizeof (*proxy));
+  lisp_value_t val = LISP_OBJECT (LISP_TAG_FUNCTION_PROXY, proxy);
+  if (!proxy)
+    return lisp_exception ();
+
+  proxy->func = func;
+  proxy->obj.ref_count = 1;
+  proxy->obj.ops = &lisp_function_proxy_operations;
+  list_add (&proxy->obj.list, &ctx->object_list);
 
   return val;
 }
@@ -1105,6 +1405,7 @@ lisp_set_function_name (lisp_context_t *ctx, lisp_value_ref_t function,
                         lisp_value_t name)
 {
   struct lisp_function *fn = lisp_get_object (ctx, function, LISP_TAG_LAMBDA);
+
   if (!fn)
     {
       lisp_free_value (ctx, name);
@@ -1112,6 +1413,10 @@ lisp_set_function_name (lisp_context_t *ctx, lisp_value_ref_t function,
     }
   lisp_free_value (ctx, fn->name);
   fn->name = name;
+
+  lisp_set_value_in_context (fn->ctx, lisp_dup_value (fn->ctx, fn->name),
+                             lisp_function_proxy_new (ctx, fn));
+
   return 0;
 }
 
@@ -1157,7 +1462,6 @@ lisp_set_value_in_context (lisp_context_t *ctx, lisp_value_t name,
   if (!store)
     goto fail;
 
-
   lisp_free_value (ctx, store->value);
   store->value = value;
 
@@ -1192,10 +1496,11 @@ lisp_define (lisp_context_t *ctx, lisp_value_ref_t args,
           = lisp_new_function (ctx, params, body, &lisp_function_invoker);
       lisp_free_value (ctx, sig);
 
-      lisp_set_function_name (ctx, func, lisp_dup_value (ctx, name));
-
       if (lisp_set_value_in_context (ctx, name, func))
         return lisp_exception ();
+
+      lisp_set_function_name (ctx, func, lisp_dup_value (ctx, name));
+
       return lisp_nil ();
     }
   else if (sig.tag == LISP_TAG_SYMBOL)
@@ -1232,19 +1537,29 @@ lisp_new_int32 (lisp_context_t *ctx, int32_t v)
   return val;
 }
 
+lisp_value_t
+lisp_new_real (lisp_context_t *ctx, double v)
+{
+  lisp_value_t val = LISP_REAL (v);
+  (void)ctx;
+  return val;
+}
+
 /**
- * (+ a b [c ...])
+ * (+ a [b ...])
+ * (* a [b ...])
  */
 static lisp_value_t
-lisp_plus (lisp_context_t *ctx, lisp_value_ref_t args,
-           struct lisp_function *unused)
+lisp_plus_or_multiply (lisp_context_t *ctx, lisp_value_ref_t args,
+                       struct lisp_function *fn)
 {
   int32_t sum = 0;
+  int32_t product = 1;
   int32_t num = 0;
   lisp_value_t result = LISP_EXCEPTION;
   lisp_value_t list = lisp_dup_value (ctx, args);
-
-  (void)unused;
+  LISP_DEFINE_SYMBOL (name_plus, "+");
+  // LISP_DEFINE_SYMBOL (name_multiply, "*");
 
   while (!LISP_IS_NIL (list))
     {
@@ -1257,11 +1572,17 @@ lisp_plus (lisp_context_t *ctx, lisp_value_ref_t args,
           goto fail;
         }
       lisp_free_value (ctx, val);
-      sum += num;
+
+      if (lisp_sym_eq (name_plus, fn->params))
+        sum += num;
+      else
+        product *= num;
       list = lisp_cdr_take (ctx, list);
     }
-
-  result = lisp_new_int32 (ctx, sum);
+  if (lisp_sym_eq (name_plus, fn->params))
+    result = lisp_new_int32 (ctx, sum);
+  else
+    result = lisp_new_int32 (ctx, product);
 
 fail:
   lisp_free_value (ctx, list);
@@ -1382,42 +1703,42 @@ lisp_binary_op_number (lisp_context_t *ctx, lisp_value_ref_t args,
       if (n1 > n2)
         result = lisp_dup_value (ctx, true_);
       else
-        result = lisp_nil ();
+        result = lisp_false ();
     }
   else if (lisp_sym_eq (fn->params, less))
     {
       if (n1 < n2)
         result = lisp_dup_value (ctx, true_);
       else
-        result = lisp_nil ();
+        result = lisp_false ();
     }
   else if (lisp_sym_eq (fn->params, greater_equal))
     {
       if (n1 >= n2)
         result = lisp_dup_value (ctx, true_);
       else
-        result = lisp_nil ();
+        result = lisp_false ();
     }
   else if (lisp_sym_eq (fn->params, less_equal))
     {
       if (n1 <= n2)
         result = lisp_dup_value (ctx, true_);
       else
-        result = lisp_nil ();
+        result = lisp_false ();
     }
   else if (lisp_sym_eq (fn->params, equal))
     {
       if (n1 == n2)
         result = lisp_dup_value (ctx, true_);
       else
-        result = lisp_nil ();
+        result = lisp_false ();
     }
   else if (lisp_sym_eq (fn->params, not_equal))
     {
       if (n1 != n2)
         result = lisp_dup_value (ctx, true_);
       else
-        result = lisp_nil ();
+        result = lisp_false ();
     }
 
   else if (lisp_sym_eq (fn->params, divide))
@@ -1540,6 +1861,22 @@ lisp_print (lisp_context_t *ctx, lisp_value_ref_t args,
   return lisp_nil ();
 }
 
+int
+lisp_to_bool (lisp_context_t *ctx, lisp_value_ref_t val, int *res)
+{
+  if (LISP_IS_EXCEPTION (val))
+    return -1;
+
+  if (val.tag != LISP_TAG_BOOLEAN)
+    {
+      lisp_throw_internal_error (ctx, "Expected a boolean");
+      return -1;
+    }
+
+  *res = val.i32;
+  return 0;
+}
+
 /**
  * (if cond texpr fexpr)
  */
@@ -1564,11 +1901,18 @@ lisp_if (lisp_context_t *ctx, lisp_value_ref_t args,
   lisp_free_value (ctx, args);
 
   {
+    int v = 0;
     lisp_value_t cond_var = lisp_eval (ctx, cond);
     if (LISP_IS_EXCEPTION (cond_var))
       goto fail;
 
-    if (LISP_IS_NIL (cond_var))
+    if (lisp_to_bool (ctx, cond_var, &v))
+      {
+        lisp_free_value (ctx, cond_var);
+        goto fail;
+      }
+
+    if (!v)
       {
         if (LISP_IS_NIL (fexpr))
           res = lisp_nil ();
@@ -1584,6 +1928,89 @@ fail:
   lisp_free_value (ctx, texpr);
   lisp_free_value (ctx, cond);
   return res;
+}
+
+int
+lisp_list_extract (lisp_context_t *ctx, lisp_value_ref_t list,
+                   lisp_value_ref_t *heads, int n, lisp_value_ref_t *tail)
+{
+
+  int i;
+  int res = -1;
+
+  if (LISP_IS_EXCEPTION (list))
+    return -1;
+
+  *tail = lisp_dup_value (ctx, list);
+
+  for (i = 0; i < n; ++i)
+    {
+      heads[i] = lisp_car (ctx, *tail);
+      if (LISP_IS_EXCEPTION (heads[i]))
+        goto fail;
+
+      *tail = lisp_cdr_take (ctx, *tail);
+    }
+
+  res = 0;
+
+fail:
+  while (i > 0)
+    {
+      lisp_free_value (ctx, heads[i - 1]);
+      i--;
+    }
+
+  lisp_free_value (ctx, *tail);
+  return res;
+}
+
+/**
+ * (cond (CONDTION BODY...) ...)
+ */
+static lisp_value_t
+lisp_cond (lisp_context_t *ctx, lisp_value_ref_t args,
+           struct lisp_function *unused)
+{
+  LISP_DEFINE_SYMBOL (sym_else, "ELSE");
+  lisp_value_ref_t clause;
+  (void)unused;
+
+  while (!LISP_IS_NIL (args))
+    {
+      int value;
+      lisp_value_t condition_value;
+      lisp_value_ref_t condition, body;
+      if (lisp_list_extract (ctx, args, &clause, 1, &args))
+        return lisp_exception ();
+
+      if (lisp_list_extract (ctx, clause, &condition, 1, &body))
+        return lisp_exception ();
+
+      if (LISP_IS_SYMBOL (condition) && lisp_sym_eq (condition, sym_else))
+        {
+          if (!LISP_IS_NIL (args))
+            return lisp_throw_internal_error (
+                ctx, "ELSE must be the last clause in COND");
+          condition_value = lisp_true ();
+        }
+      else
+        condition_value = lisp_eval (ctx, condition);
+      if (LISP_IS_EXCEPTION (condition_value))
+        return lisp_exception ();
+      if (lisp_to_bool (ctx, condition_value, &value))
+        {
+          lisp_free_value (ctx, condition_value);
+          return lisp_exception ();
+        }
+      lisp_free_value (ctx, condition_value);
+      if (value)
+        {
+          return lisp_eval_list (ctx, body);
+        }
+    }
+
+  return lisp_nil ();
 }
 
 /**
@@ -1606,14 +2033,14 @@ lisp_lambda (lisp_context_t *ctx, lisp_value_ref_t args,
   return val;
 }
 
-static lisp_value_t
+lisp_value_t
 lisp_true ()
 {
   lisp_value_t val = LISP_TRUE;
   return val;
 }
 
-static lisp_value_t
+lisp_value_t
 lisp_false ()
 {
   lisp_value_t val = LISP_FALSE;
@@ -1808,7 +2235,8 @@ lisp_new_global_context (lisp_runtime_t *rt)
 
   LISP_DEFINE_FUNCTION (ctx, "DEFINE", nil, &lisp_define);
   LISP_DEFINE_FUNCTION (ctx, "QUOTE", nil, &lisp_quote);
-  LISP_DEFINE_FUNCTION (ctx, "+", nil, &lisp_plus);
+  LISP_DEFINE_FUNCTION (ctx, "+", nil, &lisp_plus_or_multiply);
+  LISP_DEFINE_FUNCTION (ctx, "*", nil, &lisp_plus_or_multiply);
   LISP_DEFINE_FUNCTION (ctx, "-", nil, &lisp_minus);
   LISP_DEFINE_FUNCTION (ctx, "DUMP-CONTEXT-INFO", nil, &lisp_dump_context);
   LISP_DEFINE_FUNCTION (ctx, "PRINT", nil, &lisp_print);
@@ -1836,6 +2264,12 @@ lisp_new_global_context (lisp_runtime_t *rt)
   LISP_DEFINE_FUNCTION (ctx, "ATOM?", nil, &lisp_atom_p);
   LISP_DEFINE_FUNCTION (ctx, "ZERO?", nil, &lisp_zero_p);
 
+  LISP_DEFINE_FUNCTION (ctx, "COND", nil, &lisp_cond);
+
+  lisp_set_value_in_context (ctx, lisp_new_symbol (ctx, "#T"), lisp_true ());
+  lisp_set_value_in_context (ctx, lisp_new_symbol (ctx, "#F"), lisp_false ());
+  lisp_set_value_in_context (ctx, lisp_new_symbol (ctx, "NIL"), lisp_nil ());
+
   return ctx;
 }
 
@@ -1857,18 +2291,31 @@ lisp_eval (lisp_context_t *ctx, lisp_value_ref_t val)
           return lisp_exception ();
         }
 
-      if (func.tag != LISP_TAG_LAMBDA)
+      if (func.tag == LISP_TAG_LAMBDA)
+        {
+          fn = func.ptr;
+
+          args = lisp_cdr (ctx, val);
+          r = fn->invoker (ctx, args, fn);
+          lisp_free_value (ctx, args);
+          lisp_free_value (ctx, func);
+        }
+
+      else if (func.tag == LISP_TAG_FUNCTION_PROXY)
+        {
+          struct lisp_function_proxy *proxy = func.ptr;
+          fn = proxy->func;
+          args = lisp_cdr (ctx, val);
+          r = fn->invoker (ctx, args, fn);
+          lisp_free_value (ctx, args);
+          lisp_free_value (ctx, func);
+        }
+      else
         {
           lisp_throw_internal_error (ctx, "Need a function");
           lisp_free_value (ctx, func);
           return lisp_exception ();
         }
-      fn = func.ptr;
-
-      args = lisp_cdr (ctx, val);
-      r = fn->invoker (ctx, args, fn);
-      lisp_free_value (ctx, args);
-      lisp_free_value (ctx, func);
 
       return r;
     }

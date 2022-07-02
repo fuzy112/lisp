@@ -5,5 +5,6 @@ project('lisp', 'c',
 executable('lisp',
            'lisp.c',
            'main.c',
+           'string_buf.c',
            c_args : ['-std=gnu11'],
            install : true)
