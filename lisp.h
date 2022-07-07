@@ -47,7 +47,8 @@ lisp_runtime_t *lisp_runtime_new ();
 void lisp_runtime_free (lisp_runtime_t *rt);
 
 lisp_context_t *lisp_context_new (lisp_runtime_t *rt, const char *name);
-void lisp_context_free (lisp_context_t *ctx);
+lisp_context_t *lisp_context_ref (lisp_context_t *ctx);
+void lisp_context_unref (lisp_context_t *ctx);
 
 lisp_runtime_t *lisp_get_runtime (lisp_context_t *ctx);
 
@@ -164,5 +165,17 @@ typedef struct lisp_reader lisp_reader_t;
 lisp_reader_t *lisp_reader_new (lisp_context_t *ctx, FILE *filep);
 void lisp_reader_free (lisp_reader_t *reader);
 lisp_value_t lisp_read_form (lisp_reader_t *reader);
+
+struct lisp_object;
+
+void lisp_mark_value (lisp_runtime_t *rt, lisp_value_ref_t val,
+                      void gc_mark_func (lisp_runtime_t *,
+                                         struct lisp_object *));
+void lisp_mark_context (lisp_runtime_t *rt, lisp_context_t *ctx,
+      void mark_func (lisp_runtime_t *, struct lisp_object *));
+
+
+void lisp_gc (lisp_context_t *ctx);
+void lisp_gc_rt (lisp_runtime_t *rt);
 
 #endif // LISP_H

@@ -20,6 +20,10 @@ repl ()
   while (!feof (stdin))
     {
       exp = lisp_read_form (reader);
+      if (LISP_IS_EXCEPTION (exp)) {
+        lisp_print_exception (ctx);
+        break;
+      }
       lisp_print_value (ctx, exp);
       val = lisp_eval (ctx, exp);
       if (LISP_IS_EXCEPTION (val))
@@ -29,11 +33,14 @@ repl ()
       lisp_free_value (ctx, val);
       lisp_free_value (ctx, exp);
 
+      lisp_gc (ctx);
+
       fprintf (stderr, ">>> ");
     }
 
   lisp_reader_free (reader);
-  lisp_context_free (ctx);
+  lisp_context_unref (ctx);
+  lisp_gc_rt (rt);
   lisp_runtime_free (rt);
 
   return 0;
@@ -64,7 +71,8 @@ interpreter (FILE *filep, char **args)
     }
 
   lisp_reader_free (reader);
-  lisp_context_free (ctx);
+  lisp_context_unref (ctx);
+  lisp_gc_rt (rt);
   lisp_runtime_free (rt);
 
   return 0;
@@ -74,7 +82,8 @@ fail:
 
   lisp_reader_free (reader);
 
-  lisp_context_free (ctx);
+  lisp_context_unref (ctx);
+  lisp_gc_rt (rt);
   lisp_runtime_free (rt);
 
   return -1;
