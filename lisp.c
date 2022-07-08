@@ -831,6 +831,65 @@ lisp_new_vector (lisp_context_t *ctx, int n, lisp_value_ref_t *elems)
   return LISP_OBJECT (LISP_TAG_VECTOR, vec);
 }
 
+static lisp_value_t
+lisp_vector_length (lisp_context_t *ctx, int argc, lisp_value_ref_t *argv)
+{
+  struct lisp_vector *vec = lisp_get_object (ctx, argv[0], LISP_TAG_VECTOR);
+
+  return lisp_new_int32 (ctx, vec->length);
+}
+
+static lisp_value_t
+lisp_vector_capacity (lisp_context_t *ctx, int argc, lisp_value_ref_t *argv)
+{
+  struct lisp_vector *vec = lisp_get_object (ctx, argv[0], LISP_TAG_VECTOR);
+
+  return lisp_new_int32 (ctx, vec->capacity);
+}
+
+/**
+ * (vector-ref my-vec 1)
+ */ 
+static lisp_value_t
+lisp_vector_ref (lisp_context_t *ctx, int argc, lisp_value_ref_t *argv)
+{
+  struct lisp_vector *vec = lisp_get_object (ctx, argv[0], LISP_TAG_VECTOR);
+  int32_t pos = -1;
+
+  if (lisp_to_int32 (ctx, &pos, argv[1]))
+    return lisp_exception ();
+
+  if ((size_t )pos >= vec->length)
+    return lisp_throw_internal_error (ctx, "Out of range");
+
+  return lisp_dup_value (ctx, 
+    vec->data[pos]);
+}
+
+/**
+ * (vector-set! my-vec 2 elem)
+ */ 
+static lisp_value_t
+lisp_vector_set (lisp_context_t *ctx, int argc, lisp_value_ref_t *argv)
+{
+  struct lisp_vector *vec = lisp_get_object (ctx, argv[0], LISP_TAG_VECTOR);
+  int32_t pos = -1;
+
+  if (lisp_to_int32 (ctx, &pos, argv[1]))
+    return lisp_exception ();
+
+  if (pos >= vec->length)
+    return lisp_throw_internal_error (ctx, "Out of range");
+
+  {
+    lisp_value_t tmp = vec->data[pos];
+    vec->data[pos] = lisp_dup_value (ctx, argv[2]);
+    lisp_free_value (ctx, tmp);
+  }
+
+  return lisp_nil ();
+}
+
 lisp_value_t
 lisp_throw (lisp_context_t *ctx, lisp_value_t error)
 {
@@ -1474,7 +1533,7 @@ lisp_context_set_var (lisp_context_t *ctx, lisp_value_ref_t name,
         {
           if (lisp_sym_eq (name, var->name))
             {
-              lisp_free_value (ctx, var->value);
+              lisp_free_value (orig_ctx, var->value);
               var->value = value;
 
               return lisp_nil ();
@@ -1484,7 +1543,7 @@ lisp_context_set_var (lisp_context_t *ctx, lisp_value_ref_t name,
       ctx = ctx->parent;
     }
 
-  lisp_free_value (ctx, value);
+  lisp_free_value (orig_ctx, value);
   return lisp_throw_internal_error (orig_ctx, "no such variable");
 }
 
@@ -2566,6 +2625,12 @@ lisp_gc_ (lisp_context_t *ctx, int argc, lisp_value_ref_t *argv)
 }
 
 
+static lisp_value_t
+lisp_begin (lisp_context_t *ctx, lisp_value_ref_t args, struct lisp_function *unused)
+{
+  return lisp_eval_list (ctx, args);
+}
+
 static int
 lisp_define_cfunc (lisp_context_t *ctx, lisp_value_t name,
                    lisp_cfunc_simple *cfunc, int n)
@@ -2609,12 +2674,14 @@ lisp_new_global_context (lisp_runtime_t *rt)
   lisp_context_t *r;
 
   LISP_DEFINE_MACRO (ctx, "DEFINE", nil, &lisp_define);
+  LISP_DEFINE_MACRO (ctx, "SET!", nil, &lisp_set_);
   LISP_DEFINE_MACRO (ctx, "QUOTE", nil, &lisp_quote);
   LISP_DEFINE_MACRO (ctx, "+", nil, &lisp_plus_or_multiply);
   LISP_DEFINE_MACRO (ctx, "*", nil, &lisp_plus_or_multiply);
   LISP_DEFINE_MACRO (ctx, "-", nil, &lisp_minus);
   LISP_DEFINE_MACRO (ctx, "DUMP-CONTEXT-INFO", nil, &lisp_dump_context);
   LISP_DEFINE_MACRO (ctx, "PRINT", nil, &lisp_print);
+  LISP_DEFINE_MACRO (ctx, "DISPLAY", nil, &lisp_print);
   LISP_DEFINE_MACRO (ctx, "IF", nil, &lisp_if);
 
   LISP_DEFINE_MACRO (ctx, ">", nil, &lisp_binary_op_number);
@@ -2642,8 +2709,13 @@ lisp_new_global_context (lisp_runtime_t *rt)
   LISP_DEFINE_MACRO (ctx, "LET", nil, &lisp_let);
   LISP_DEFINE_MACRO (ctx, "LET*", nil, &lisp_let);
   LISP_DEFINE_MACRO (ctx, "COND", nil, &lisp_cond);
+  LISP_DEFINE_MACRO (ctx, "BEGIN", nil, &lisp_begin);
 
   LISP_DEFINE_CFUNC (ctx, "VECTOR", lisp_new_vector, -1);
+  LISP_DEFINE_CFUNC (ctx, "VECTOR-LENGTH", lisp_vector_length, 1);
+  LISP_DEFINE_CFUNC (ctx, "VECTOR-CAPACITY", lisp_vector_capacity, 1);
+  LISP_DEFINE_CFUNC (ctx, "VECTOR-REF", lisp_vector_ref, 2);
+  LISP_DEFINE_CFUNC (ctx, "VECTOR-SET!", lisp_vector_set, 3);
 
   lisp_context_define_var (ctx, lisp_new_symbol (ctx, "#T"), lisp_true ());
   lisp_context_define_var (ctx, lisp_new_symbol (ctx, "#F"), lisp_false ());
