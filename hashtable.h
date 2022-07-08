@@ -3,8 +3,7 @@
 
 #include "list.h"
 #include "hash.h"
-
-#include <math.h>
+#include "log2.h"
 
 #ifndef ARRAY_SIZE
 #  define ARRAY_SIZE(x) (sizeof((x)) / sizeof((x)[0]))
@@ -18,7 +17,7 @@
 	struct hlist_head name[1 << (bits)]
 
 #define HASH_SIZE(name) (ARRAY_SIZE(name))
-#define HASH_BITS(name) ilogb(HASH_SIZE(name))
+#define HASH_BITS(name) ilog2(HASH_SIZE(name))
 
 /* Use hash_32 when possible to allow for fast 32bit hashing in 64bit kernels. */
 #define hash_min(val, bits)							\
