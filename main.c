@@ -33,7 +33,7 @@ repl ()
       lisp_free_value (ctx, val);
       lisp_free_value (ctx, exp);
 
-      lisp_gc (ctx);
+      lisp_gc_rt (rt);
 
       fprintf (stderr, ">>> ");
     }

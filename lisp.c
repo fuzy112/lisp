@@ -40,12 +40,13 @@ struct lisp_object
   int mark_flag;
 };
 
-
 struct lisp_runtime
 {
+  long gc_threshold;
   long nr_blocks;
   lisp_value_t exception_list;
   struct list_head gc_list;
+  struct list_head tmp_list;
   time_t last_gc;
 };
 
@@ -104,7 +105,6 @@ lisp_object_unref (lisp_runtime_t *rt, struct lisp_object *obj)
   lisp_free_rt (rt, obj);
 }
 
-
 static void
 lisp_function_gc_mark (lisp_runtime_t *rt, struct lisp_object *obj,
                        void mark_func (lisp_runtime_t *rt,
@@ -146,6 +146,7 @@ lisp_runtime_new (void)
   rt->exception_list = lisp_nil ();
   INIT_LIST_HEAD (&rt->gc_list);
   rt->last_gc = time (NULL);
+  rt->gc_threshold = 128;
   return rt;
 }
 
@@ -170,32 +171,6 @@ lisp_mark_value (lisp_runtime_t *rt, lisp_value_ref_t val,
     }
 }
 
-void
-lisp_mark_obj (lisp_runtime_t *rt, struct lisp_object *obj)
-{
-  obj->ref_count++;
-
-  if (obj->mark_flag)
-    return;
-
-  obj->mark_flag = 1;
-
-  if (obj->ops->gc_mark)
-    {
-      obj->ops->gc_mark (rt, obj, lisp_mark_obj);
-    }
-}
-
-void
-lisp_gc (lisp_context_t *ctx)
-{
-  lisp_runtime_t *rt = lisp_get_runtime (ctx);
-
-  // lisp_clear_ref_count (rt);
-  // lisp_mark_obj (rt, &ctx->obj);
-  // lisp_sweep_objects (rt);
-}
-
 static void lisp_paint_gray (lisp_runtime_t *rt, struct lisp_object *obj);
 
 void
@@ -211,17 +186,18 @@ lisp_paint_gray (lisp_runtime_t *rt, struct lisp_object *obj)
   if (obj->mark_flag == LISP_MARK_HATCH || obj->mark_flag == LISP_MARK_BLACK)
     {
       obj->mark_flag = LISP_MARK_GRAY;
-      
-      if (obj->ops->gc_mark )
-        obj->ops->gc_mark(rt, obj, lisp_decref_paint_gray);
+
+      if (obj->ops->gc_mark)
+        obj->ops->gc_mark (rt, obj, lisp_decref_paint_gray);
     }
 }
 
 static void lisp_paint_black (lisp_runtime_t *rt, struct lisp_object *obj);
 
-void lisp_incref_paint_black (lisp_runtime_t *rt, struct lisp_object *obj)
+void
+lisp_incref_paint_black (lisp_runtime_t *rt, struct lisp_object *obj)
 {
-  obj->ref_count ++;
+  obj->ref_count++;
 
   if (obj->mark_flag != LISP_MARK_BLACK)
     {
@@ -229,11 +205,12 @@ void lisp_incref_paint_black (lisp_runtime_t *rt, struct lisp_object *obj)
     }
 }
 
-void lisp_paint_black (lisp_runtime_t *rt, struct lisp_object *obj)
+void
+lisp_paint_black (lisp_runtime_t *rt, struct lisp_object *obj)
 {
   obj->mark_flag = LISP_MARK_BLACK;
-  if (obj->ops->gc_mark )
-        obj->ops->gc_mark (rt, obj, lisp_incref_paint_black);
+  if (obj->ops->gc_mark)
+    obj->ops->gc_mark (rt, obj, lisp_incref_paint_black);
 }
 
 void
@@ -248,36 +225,76 @@ lisp_scan_gray (lisp_runtime_t *rt, struct lisp_object *obj)
       else
         {
           obj->mark_flag = LISP_MARK_WHITE;
-          if (obj->ops->gc_mark )
-        obj->ops->gc_mark (rt, obj, lisp_scan_gray);
+          if (obj->ops->gc_mark)
+            obj->ops->gc_mark (rt, obj, lisp_scan_gray);
         }
     }
 }
 
-void lisp_collect_white (lisp_runtime_t *rt, struct lisp_object *obj)
+void
+lisp_collect_white (lisp_runtime_t *rt, struct lisp_object *obj)
 {
+  assert (obj);
   if (obj->mark_flag == LISP_MARK_WHITE)
-      {
-        // obj->mark_flag = LISP_MARK_BLACK;
-        if (obj->ops->gc_mark )
+    {
+      obj->mark_flag = LISP_MARK_BLACK;
+      if (obj->ops->gc_mark)
         obj->ops->gc_mark (rt, obj, lisp_collect_white);
-        
-        // reclaim
-        list_del (&obj->list);
-        if (obj->ops->finalize) {
+
+      // reclaim
+      list_move (&obj->list, &rt->tmp_list);
+      if (obj->ops->finalize)
+        {
           obj->ops->finalize (rt, obj);
         }
-        lisp_free_rt (rt, obj);
-      }
+    }
 }
 
 void
 lisp_scan_gc_list (lisp_runtime_t *rt)
 {
+  struct lisp_object *obj, *tmp;
+
+  INIT_LIST_HEAD (&rt->tmp_list);
+
   while (!list_empty (&rt->gc_list))
     {
-      struct lisp_object *obj
-          = list_first_entry (&rt->gc_list, struct lisp_object, list);
+      obj = list_first_entry (&rt->gc_list, struct lisp_object, list);
+      list_del_init (&obj->list);
+
+      if (obj->mark_flag == LISP_MARK_HATCH)
+        {
+          lisp_paint_gray (rt, obj);
+          lisp_scan_gray (rt, obj);
+
+          lisp_collect_white (rt, obj);
+
+          break;
+        }
+    }
+
+  list_for_each_entry_safe (obj, tmp, &rt->tmp_list, list)
+    {
+      lisp_free_rt (rt, obj);
+    }
+
+  rt->last_gc = time (NULL);
+  if (rt->nr_blocks >= rt->gc_threshold)
+    {
+      rt->gc_threshold *= 2;
+    }
+}
+
+void
+lisp_gc_rt (lisp_runtime_t *rt)
+{
+  struct lisp_object *obj, *tmp;
+
+  INIT_LIST_HEAD (&rt->tmp_list);
+
+  while (!list_empty (&rt->gc_list))
+    {
+      obj = list_first_entry (&rt->gc_list, struct lisp_object, list);
       list_del_init (&obj->list);
 
       if (obj->mark_flag == LISP_MARK_HATCH)
@@ -285,18 +302,19 @@ lisp_scan_gc_list (lisp_runtime_t *rt)
           lisp_paint_gray (rt, obj);
           lisp_scan_gray (rt, obj);
           lisp_collect_white (rt, obj);
-          break;
         }
     }
-}
 
-void
-lisp_gc_rt (lisp_runtime_t *rt)
-{
-  while (!list_empty (&rt->gc_list))
-      {
-        lisp_scan_gc_list (rt);
-      }
+  list_for_each_entry_safe (obj, tmp, &rt->tmp_list, list)
+    {
+      lisp_free_rt (rt, obj);
+    }
+
+  rt->last_gc = time (NULL);
+  if (rt->nr_blocks >= rt->gc_threshold)
+    {
+      rt->gc_threshold *= 2;
+    }
 }
 
 static void
@@ -309,9 +327,9 @@ lisp_context_finalize (lisp_runtime_t *rt, struct lisp_object *obj)
   lisp_free_rt (rt, ctx->name);
 
   hash_for_each_safe (ctx->var_table, bkt, tmp, var, node)
-  {
-    lisp_free_rt (rt, var);
-  }
+    {
+      lisp_free_rt (rt, var);
+    }
 }
 
 static void
@@ -324,10 +342,10 @@ lisp_context_gc_mark (lisp_runtime_t *rt, struct lisp_object *obj,
   lisp_context_t *ctx = (lisp_context_t *)obj;
 
   hash_for_each (ctx->var_table, bkt, var, node)
-  {
-    lisp_mark_value (rt, var->name, mark_func);
-    lisp_mark_value (rt, var->value, mark_func);
-  }
+    {
+      lisp_mark_value (rt, var->name, mark_func);
+      lisp_mark_value (rt, var->value, mark_func);
+    }
 
   if (ctx->parent)
     mark_func (rt, &ctx->parent->obj);
@@ -385,7 +403,15 @@ lisp_get_runtime (lisp_context_t *ctx)
 void *
 lisp_malloc_rt (lisp_runtime_t *rt, size_t size)
 {
-  void *ptr = calloc (1, size);
+  void *ptr;
+  time_t now = time (NULL);
+
+  if (now - rt->last_gc > 1 || rt->nr_blocks > rt->gc_threshold)
+    {
+      lisp_scan_gc_list (rt);
+    }
+
+  ptr = calloc (1, size);
   if (ptr)
     rt->nr_blocks += 1;
   return ptr;
@@ -1265,10 +1291,10 @@ lisp_context_get_var (lisp_context_t *ctx, lisp_value_ref_t name)
   while (ctx != NULL)
     {
       hash_for_each_possible (ctx->var_table, var, node, key)
-      {
-        if (lisp_sym_eq (name, var->name))
-          return lisp_dup_value (ctx, var->value);
-      }
+        {
+          if (lisp_sym_eq (name, var->name))
+            return lisp_dup_value (ctx, var->value);
+        }
 
       ctx = ctx->parent;
     }
@@ -1292,15 +1318,15 @@ lisp_context_set_var (lisp_context_t *ctx, lisp_value_ref_t name,
   while (ctx != NULL)
     {
       hash_for_each_possible (ctx->var_table, var, node, key)
-      {
-        if (lisp_sym_eq (name, var->name))
-          {
-            lisp_free_value (ctx, var->value);
-            var->value = value;
+        {
+          if (lisp_sym_eq (name, var->name))
+            {
+              lisp_free_value (ctx, var->value);
+              var->value = value;
 
-            return lisp_nil ();
-          }
-      }
+              return lisp_nil ();
+            }
+        }
 
       ctx = ctx->parent;
     }
@@ -1396,43 +1422,6 @@ lisp_function_invoker (lisp_context_t *ctx, lisp_value_ref_t args,
   val = lisp_eval_list (new_ctx, func->body);
   lisp_context_unref (new_ctx);
   return val;
-}
-
-static unsigned
-lisp_list_contains_symbol (lisp_context_t *ctx, lisp_value_ref_t list,
-                           lisp_value_t elem)
-{
-  unsigned result = 0;
-  lisp_dup_value (ctx, list);
-
-  while (!LISP_IS_NIL (list))
-    {
-      lisp_value_t car = lisp_car (ctx, list);
-      result = lisp_sym_eq (car, elem);
-      lisp_free_value (ctx, car);
-
-      if (result)
-        break;
-      list = lisp_cdr_take (ctx, list);
-    }
-
-  lisp_free_value (ctx, list);
-  return result;
-}
-
-static unsigned
-lisp_var_list_contains (lisp_context_t *ctx, lisp_value_ref_t name)
-{
-  size_t bkt;
-  struct lisp_variable *var;
-
-  hash_for_each (ctx->var_table, bkt, var, node)
-  {
-    if (lisp_sym_eq (var->name, name))
-      return 1;
-  }
-
-  return 0;
 }
 
 static lisp_value_t
@@ -1755,21 +1744,17 @@ fail:
   return result;
 }
 
-static long long
-list_length (struct list_head *head)
-{
-  struct list_head *h;
-  long long n = 0;
-
-  list_for_each (h, head) { ++n; }
-
-  return n;
-}
-
 static int
 lisp_do_dump_context (lisp_context_t *ctx)
 {
-  long long nr_variables = -1; // list_length (&ctx->var_list);
+  size_t bucket;
+  long long nr_variables = 0;
+  struct lisp_variable *var;
+
+  hash_for_each (ctx->var_table, bucket, var, node)
+    {
+      nr_variables += 1;
+    }
 
   printf ("context [ name = %s, "
           "nr_variables: %lld ]\n",

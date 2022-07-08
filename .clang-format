@@ -1,1 +1,10 @@
 BasedOnStyle: GNU
+ForEachMacros:
+  - list_for_each
+  - list_for_each_safe
+  - list_for_each_entry
+  - list_for_each_entry_safe
+  - hash_for_each
+  - hash_for_each_safe
+  - hash_for_each_possible
+  - hash_for_each_possible_safe
