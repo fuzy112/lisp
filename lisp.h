@@ -21,7 +21,7 @@ enum lisp_tag
   LISP_TAG_LIST,
 
   LISP_TAG_LAMBDA,
-  LISP_TAG_FUNCTION_PROXY,
+  LISP_TAG_VECTOR,
 };
 
 typedef struct lisp_value
@@ -97,9 +97,7 @@ lisp_value_t lisp_eval (lisp_context_t *ctx, lisp_value_ref_t exp);
   }
 
 #define LISP_OBJECT(Tag, Pointer)                                             \
-  {                                                                           \
-    { .tag = (Tag) }, { .ptr = (Pointer) }                                    \
-  }
+  ((lisp_value_t){ { .tag = (Tag) }, { .ptr = (Pointer) } })
 
 #define LISP_IS_EXCEPTION(val) ((val).tag == LISP_TAG_EXCEPTION)
 
@@ -172,10 +170,9 @@ void lisp_mark_value (lisp_runtime_t *rt, lisp_value_ref_t val,
                       void gc_mark_func (lisp_runtime_t *,
                                          struct lisp_object *));
 void lisp_mark_context (lisp_runtime_t *rt, lisp_context_t *ctx,
-      void mark_func (lisp_runtime_t *, struct lisp_object *));
+                        void mark_func (lisp_runtime_t *,
+                                        struct lisp_object *));
 
-
-void lisp_gc (lisp_context_t *ctx);
-void lisp_gc_rt (lisp_runtime_t *rt);
+void lisp_gc (lisp_runtime_t *rt);
 
 #endif // LISP_H

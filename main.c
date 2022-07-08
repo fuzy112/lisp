@@ -24,7 +24,7 @@ repl ()
         lisp_print_exception (ctx);
         break;
       }
-      lisp_print_value (ctx, exp);
+      // lisp_print_value (ctx, exp);
       val = lisp_eval (ctx, exp);
       if (LISP_IS_EXCEPTION (val))
         lisp_print_exception (ctx);
@@ -33,14 +33,14 @@ repl ()
       lisp_free_value (ctx, val);
       lisp_free_value (ctx, exp);
 
-      lisp_gc_rt (rt);
+      lisp_gc (rt);
 
       fprintf (stderr, ">>> ");
     }
 
   lisp_reader_free (reader);
   lisp_context_unref (ctx);
-  lisp_gc_rt (rt);
+  lisp_gc (rt);
   lisp_runtime_free (rt);
 
   return 0;
@@ -72,7 +72,7 @@ interpreter (FILE *filep, char **args)
 
   lisp_reader_free (reader);
   lisp_context_unref (ctx);
-  lisp_gc_rt (rt);
+  lisp_gc (rt);
   lisp_runtime_free (rt);
 
   return 0;
@@ -83,7 +83,7 @@ fail:
   lisp_reader_free (reader);
 
   lisp_context_unref (ctx);
-  lisp_gc_rt (rt);
+  lisp_gc (rt);
   lisp_runtime_free (rt);
 
   return -1;
