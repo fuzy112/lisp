@@ -24,6 +24,14 @@ struct lisp_object_operations
                    void mark_func (lisp_runtime_t *rt, struct lisp_object *));
 };
 
+enum lisp_mark_color
+{
+  LISP_MARK_BLACK,
+  LISP_MARK_WHITE,
+  LISP_MARK_GRAY,
+  LISP_MARK_HATCH,
+};
+
 struct lisp_object
 {
   long ref_count;
@@ -32,33 +40,12 @@ struct lisp_object
   int mark_flag;
 };
 
-static void
-lisp_object_unref (lisp_runtime_t *rt, struct lisp_object *obj)
-{
-  assert (obj);
-  if (--obj->ref_count > 0)
-    return;
-
-  list_del (&obj->list);
-
-  if (obj->ops->gc_mark)
-    {
-      obj->ops->gc_mark (rt, obj, lisp_object_unref);
-    }
-
-  if (obj->ops->finalize)
-    {
-      obj->ops->finalize (rt, obj);
-    }
-
-  lisp_free_rt (rt, obj);
-}
 
 struct lisp_runtime
 {
   long nr_blocks;
   lisp_value_t exception_list;
-  struct list_head object_list;
+  struct list_head gc_list;
   time_t last_gc;
 };
 
@@ -90,6 +77,33 @@ struct lisp_function
 
   lisp_context_t *ctx;
 };
+
+static void
+lisp_object_unref (lisp_runtime_t *rt, struct lisp_object *obj)
+{
+  assert (obj);
+  if (--obj->ref_count > 0)
+    {
+      obj->mark_flag = LISP_MARK_HATCH;
+      list_move_tail (&obj->list, &rt->gc_list);
+      return;
+    }
+
+  list_del (&obj->list);
+
+  if (obj->ops->gc_mark)
+    {
+      obj->ops->gc_mark (rt, obj, lisp_object_unref);
+    }
+
+  if (obj->ops->finalize)
+    {
+      obj->ops->finalize (rt, obj);
+    }
+
+  lisp_free_rt (rt, obj);
+}
+
 
 static void
 lisp_function_gc_mark (lisp_runtime_t *rt, struct lisp_object *obj,
@@ -130,8 +144,8 @@ lisp_runtime_new (void)
   lisp_runtime_t *rt = malloc (sizeof (*rt));
   rt->nr_blocks = 0;
   rt->exception_list = lisp_nil ();
-  INIT_LIST_HEAD (&rt->object_list);
-  rt->last_gc = time(NULL);
+  INIT_LIST_HEAD (&rt->gc_list);
+  rt->last_gc = time (NULL);
   return rt;
 }
 
@@ -139,7 +153,7 @@ void
 lisp_runtime_free (lisp_runtime_t *rt)
 {
   assert (rt->nr_blocks == 0);
-  assert (list_empty (&rt->object_list));
+  assert (list_empty (&rt->gc_list));
   free (rt);
 }
 
@@ -154,18 +168,6 @@ lisp_mark_value (lisp_runtime_t *rt, lisp_value_ref_t val,
         return;
       mark_func (rt, obj);
     }
-}
-
-void
-lisp_clear_ref_count (lisp_runtime_t *rt)
-{
-  struct lisp_object *obj;
-
-  list_for_each_entry (obj, &rt->object_list, list)
-  {
-    obj->ref_count = 0;
-    obj->mark_flag = 0;
-  }
 }
 
 void
@@ -185,39 +187,116 @@ lisp_mark_obj (lisp_runtime_t *rt, struct lisp_object *obj)
 }
 
 void
-lisp_sweep_objects (lisp_runtime_t *rt)
-{
-  struct lisp_object *obj, *tmp;
-
-  list_for_each_entry_safe (obj, tmp, &rt->object_list, list)
-  {
-    if (obj->ref_count == 0)
-      {
-        list_del_init (&obj->list);
-        if (obj->ops->finalize)
-          obj->ops->finalize (rt, obj);
-        lisp_free_rt (rt, obj);
-      }
-  }
-
-  rt->last_gc = time(NULL);
-}
-
-void
 lisp_gc (lisp_context_t *ctx)
 {
   lisp_runtime_t *rt = lisp_get_runtime (ctx);
 
-  lisp_clear_ref_count (rt);
-  lisp_mark_obj (rt, &ctx->obj);
-  lisp_sweep_objects (rt);
+  // lisp_clear_ref_count (rt);
+  // lisp_mark_obj (rt, &ctx->obj);
+  // lisp_sweep_objects (rt);
+}
+
+static void lisp_paint_gray (lisp_runtime_t *rt, struct lisp_object *obj);
+
+void
+lisp_decref_paint_gray (lisp_runtime_t *rt, struct lisp_object *obj)
+{
+  obj->ref_count--;
+  lisp_paint_gray (rt, obj);
+}
+
+void
+lisp_paint_gray (lisp_runtime_t *rt, struct lisp_object *obj)
+{
+  if (obj->mark_flag == LISP_MARK_HATCH || obj->mark_flag == LISP_MARK_BLACK)
+    {
+      obj->mark_flag = LISP_MARK_GRAY;
+      
+      if (obj->ops->gc_mark )
+        obj->ops->gc_mark(rt, obj, lisp_decref_paint_gray);
+    }
+}
+
+static void lisp_paint_black (lisp_runtime_t *rt, struct lisp_object *obj);
+
+void lisp_incref_paint_black (lisp_runtime_t *rt, struct lisp_object *obj)
+{
+  obj->ref_count ++;
+
+  if (obj->mark_flag != LISP_MARK_BLACK)
+    {
+      lisp_paint_black (rt, obj);
+    }
+}
+
+void lisp_paint_black (lisp_runtime_t *rt, struct lisp_object *obj)
+{
+  obj->mark_flag = LISP_MARK_BLACK;
+  if (obj->ops->gc_mark )
+        obj->ops->gc_mark (rt, obj, lisp_incref_paint_black);
+}
+
+void
+lisp_scan_gray (lisp_runtime_t *rt, struct lisp_object *obj)
+{
+  if (obj->mark_flag == LISP_MARK_GRAY)
+    {
+      if (obj->ref_count > 0)
+        {
+          lisp_paint_black (rt, obj);
+        }
+      else
+        {
+          obj->mark_flag = LISP_MARK_WHITE;
+          if (obj->ops->gc_mark )
+        obj->ops->gc_mark (rt, obj, lisp_scan_gray);
+        }
+    }
+}
+
+void lisp_collect_white (lisp_runtime_t *rt, struct lisp_object *obj)
+{
+  if (obj->mark_flag == LISP_MARK_WHITE)
+      {
+        // obj->mark_flag = LISP_MARK_BLACK;
+        if (obj->ops->gc_mark )
+        obj->ops->gc_mark (rt, obj, lisp_collect_white);
+        
+        // reclaim
+        list_del (&obj->list);
+        if (obj->ops->finalize) {
+          obj->ops->finalize (rt, obj);
+        }
+        lisp_free_rt (rt, obj);
+      }
+}
+
+void
+lisp_scan_gc_list (lisp_runtime_t *rt)
+{
+  while (!list_empty (&rt->gc_list))
+    {
+      struct lisp_object *obj
+          = list_first_entry (&rt->gc_list, struct lisp_object, list);
+      list_del_init (&obj->list);
+
+      if (obj->mark_flag == LISP_MARK_HATCH)
+        {
+          lisp_paint_gray (rt, obj);
+          lisp_scan_gray (rt, obj);
+          lisp_collect_white (rt, obj);
+          break;
+        }
+    }
 }
 
 void
 lisp_gc_rt (lisp_runtime_t *rt)
 {
-  lisp_clear_ref_count (rt);
-  lisp_sweep_objects (rt);
+  while (!list_empty (&rt->gc_list))
+      {
+        lisp_scan_gc_list (rt);
+      }
 }
 
 static void
@@ -267,7 +346,8 @@ lisp_context_new (lisp_runtime_t *rt, const char *name)
     return NULL;
   ctx->obj.ref_count = 1;
   ctx->obj.ops = &lisp_context_operations;
-  list_add (&ctx->obj.list, &rt->object_list);
+  INIT_LIST_HEAD (&ctx->obj.list);
+  ctx->obj.mark_flag = LISP_MARK_BLACK;
   hash_init (ctx->var_table);
   ctx->parent = NULL;
   ctx->runtime = rt;
@@ -466,8 +546,8 @@ lisp_new_cons (lisp_context_t *ctx, lisp_value_t car, lisp_value_t cdr)
 
   cons->obj.ops = &lisp_cons_operations;
   cons->obj.ref_count = 1;
-
-  list_add (&cons->obj.list, &lisp_get_runtime (ctx)->object_list);
+  cons->obj.mark_flag = LISP_MARK_BLACK;
+  INIT_LIST_HEAD (&cons->obj.list);
 
   cons->car = car;
   cons->cdr = cdr;
@@ -528,7 +608,8 @@ lisp_new_symbol_full (lisp_context_t *ctx, const char *name, int is_static)
 
   sym->obj.ref_count = 1;
   sym->obj.ops = &lisp_symbol_operations;
-  list_add (&sym->obj.list, &lisp_get_runtime (ctx)->object_list);
+  sym->obj.mark_flag = LISP_MARK_BLACK;
+  INIT_LIST_HEAD (&sym->obj.list);
 
   return val;
 }
@@ -593,7 +674,8 @@ lisp_new_string_full (lisp_context_t *ctx, const char *s, int is_static)
   str->str = lisp_strdup (ctx, s);
   str->obj.ops = &lisp_string_operations;
   str->obj.ref_count = 1;
-  list_add (&str->obj.list, &lisp_get_runtime (ctx)->object_list);
+  str->obj.mark_flag = LISP_MARK_BLACK;
+  INIT_LIST_HEAD (&str->obj.list);
 
   return val;
 }
@@ -1362,8 +1444,8 @@ lisp_new_function (lisp_context_t *ctx, lisp_value_t name, lisp_value_t params,
 
   fn->obj.ref_count = 1;
   fn->obj.ops = &lisp_function_operations;
-
-  list_add (&fn->obj.list, &lisp_get_runtime (ctx)->object_list);
+  fn->obj.mark_flag = LISP_MARK_BLACK;
+  INIT_LIST_HEAD (&fn->obj.list);
 
   fn->params = params;
   fn->body = body;
