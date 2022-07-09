@@ -1,4 +1,5 @@
 #include "string_buf.h"
+#include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -43,4 +44,27 @@ string_buf_append_char (struct string_buf *buf, int ch)
   char c = ch;
 
   return string_buf_append (buf, &c, 1);
+}
+
+int
+sbprintf (struct string_buf *buf, const char *fmt, ...)
+{
+  va_list ap;
+  int ret;
+
+  va_start (ap, fmt);
+  ret = vsbprintf (buf, fmt, ap);
+  va_end (ap);
+
+  return ret;
+}
+
+int
+vsbprintf (struct string_buf *buf, const char *fmt, va_list ap)
+{
+  char tmp[128];
+  int n = vsnprintf (tmp, sizeof (tmp), fmt, ap);
+  if (n < 0)
+    return n;
+  return string_buf_append (buf, tmp, n);
 }

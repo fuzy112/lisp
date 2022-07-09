@@ -26,7 +26,13 @@ struct lisp_object_operations
   void (*finalize) (lisp_runtime_t *rt, struct lisp_object *);
   void (*gc_mark) (lisp_runtime_t *rt, struct lisp_object *,
                    lisp_mark_func mark_func);
+
+  int (*format) (lisp_context_t *ctx, struct lisp_object *,
+                 struct string_buf *);
 };
+
+int lisp_value_format (lisp_context_t *ctx, lisp_value_ref_t val, struct string_buf *);
+
 
 enum lisp_mark_color
 {
@@ -127,8 +133,12 @@ lisp_function_gc_mark (lisp_runtime_t *rt, struct lisp_object *obj,
   mark_func (rt, &func->ctx->obj);
 }
 
+static int lisp_function_format (lisp_context_t *ctx, struct lisp_object *obj,
+                                 struct string_buf *buf);
+
 static const struct lisp_object_operations lisp_function_operations = {
-  .gc_mark = &lisp_function_gc_mark,
+  .gc_mark = lisp_function_gc_mark,
+  .format = lisp_function_format,
 };
 
 struct lisp_variable
@@ -415,7 +425,8 @@ lisp_malloc_rt (lisp_runtime_t *rt, size_t size)
   void *ptr;
   time_t now = time (NULL);
 
-  if (now - rt->last_gc > LISP_GC_INTERVAL || rt->nr_blocks >= rt->gc_threshold)
+  if (now - rt->last_gc > LISP_GC_INTERVAL
+      || rt->nr_blocks >= rt->gc_threshold)
     {
       lisp_scan_gc_list (rt);
     }
@@ -559,8 +570,53 @@ lisp_cons_gc_mark (lisp_runtime_t *rt, struct lisp_object *obj,
   lisp_mark_value (rt, cons->cdr, mark_func);
 }
 
+static int
+lisp_cons_format (lisp_context_t *ctx, struct lisp_object *obj,
+                  struct string_buf *buf)
+{
+  struct lisp_cons *cons = (struct lisp_cons *)obj;
+  int is_first = 1;
+  lisp_value_t car;
+  lisp_value_t cdr;
+
+  string_buf_append_char (buf, '(');
+
+
+  for (;;)
+    {
+      car = cons->car;
+      cdr = cons->cdr;
+
+      if (!is_first) {
+        string_buf_append_char (buf, ' ');
+      }
+      is_first = 0;
+      lisp_value_format (ctx, car, buf);
+
+      if (LISP_IS_NIL (cdr))
+        {
+          string_buf_append_char (buf, ')');
+          return 0;
+        }
+
+      if (LISP_IS_LIST (cdr))
+        {
+          cons = lisp_get_object (ctx, cdr, LISP_TAG_LIST);
+        }
+
+      else
+        {
+          sbprintf (buf, " . ");
+          lisp_value_format (ctx, cdr, buf);
+          string_buf_append_char (buf, ')');
+          return 0;
+        }
+    }
+}
+
 static const struct lisp_object_operations lisp_cons_operations = {
   .gc_mark = lisp_cons_gc_mark,
+  .format = lisp_cons_format,
 };
 
 lisp_value_t
@@ -694,8 +750,20 @@ lisp_string_finalize (lisp_runtime_t *rt, struct lisp_object *obj)
     lisp_free_rt (rt, str->str);
 }
 
+static int
+lisp_string_format (lisp_context_t *ctx, struct lisp_object *obj,
+                    struct string_buf *buf)
+{
+  struct lisp_string *str = (struct lisp_string *)obj;
+  string_buf_append_char (buf, '"');
+  string_buf_append (buf, str->str, strlen (str->str));
+  string_buf_append_char (buf, '"');
+  return 0;
+}
+
 static const struct lisp_object_operations lisp_string_operations = {
   .finalize = &lisp_string_finalize,
+  .format = &lisp_string_format,
 };
 
 lisp_value_t
@@ -849,7 +917,7 @@ lisp_vector_capacity (lisp_context_t *ctx, int argc, lisp_value_ref_t *argv)
 
 /**
  * (vector-ref my-vec 1)
- */ 
+ */
 static lisp_value_t
 lisp_vector_ref (lisp_context_t *ctx, int argc, lisp_value_ref_t *argv)
 {
@@ -859,16 +927,15 @@ lisp_vector_ref (lisp_context_t *ctx, int argc, lisp_value_ref_t *argv)
   if (lisp_to_int32 (ctx, &pos, argv[1]))
     return lisp_exception ();
 
-  if ((size_t )pos >= vec->length)
+  if (pos < 0 || (size_t)pos >= vec->length)
     return lisp_throw_internal_error (ctx, "Out of range");
 
-  return lisp_dup_value (ctx, 
-    vec->data[pos]);
+  return lisp_dup_value (ctx, vec->data[pos]);
 }
 
 /**
  * (vector-set! my-vec 2 elem)
- */ 
+ */
 static lisp_value_t
 lisp_vector_set (lisp_context_t *ctx, int argc, lisp_value_ref_t *argv)
 {
@@ -878,7 +945,7 @@ lisp_vector_set (lisp_context_t *ctx, int argc, lisp_value_ref_t *argv)
   if (lisp_to_int32 (ctx, &pos, argv[1]))
     return lisp_exception ();
 
-  if (pos >= vec->length)
+  if (pos < 0 || (size_t)pos >= vec->length)
     return lisp_throw_internal_error (ctx, "Out of range");
 
   {
@@ -1382,52 +1449,68 @@ lisp_peek_token (struct lisp_reader *reader)
     }
 }
 
+int
+lisp_value_format (lisp_context_t *ctx, lisp_value_ref_t val,
+                   struct string_buf *buf)
+{
+  if (LISP_IS_NIL (val))
+    return sbprintf (buf, "()");
+
+  if (LISP_IS_OBJECT (val))
+    {
+      struct lisp_object *obj = val.ptr;
+      if (obj->ops->format)
+        {
+          return obj->ops->format (ctx, obj, buf);
+        }
+      else
+        {
+          return sbprintf (buf, "#OBJECT");
+        }
+    }
+
+  if (val.tag == LISP_TAG_INT32)
+    {
+      return sbprintf (buf, "%" PRIi32, val.i32);
+    }
+
+  if (val.tag == LISP_TAG_INT64)
+    {
+      return sbprintf (buf, "%" PRIi64, val.i64);
+    }
+
+  if (val.tag == LISP_TAG_BOOLEAN)
+    {
+      if (val.i32)
+        {
+          return sbprintf (buf, "#T");
+        }
+      else
+        {
+          return sbprintf (buf, "#F");
+        }
+    }
+
+  assert (0 && "unreachable");
+}
+
 char *
 lisp_value_to_string (lisp_context_t *ctx, lisp_value_ref_t val)
 {
-  char *r;
-  // struct lisp_object *obj;
+  char *rv;
+  struct string_buf sb;
 
-  switch (val.tag)
+  string_buf_init (&sb);
+  if (lisp_value_format (ctx, val, &sb))
     {
-    case LISP_TAG_INT32:
-      r = lisp_malloc (ctx, 21);
-      snprintf (r, 20, "%" PRIi32, val.i32);
-      return r;
-
-    case LISP_TAG_INT64:
-      r = lisp_malloc (ctx, 41);
-      snprintf (r, 40, "%" PRIi64, val.i64);
-      return r;
-
-    case LISP_TAG_BOOLEAN:
-      if (val.i32)
-        return lisp_strdup (ctx, "#T");
-      else
-        return lisp_strdup (ctx, "#F");
-
-    case LISP_TAG_EXCEPTION:
-      assert (0 && "exception");
+      string_buf_destroy (&sb);
       return NULL;
-
-    case LISP_TAG_STRING:
-      {
-        struct lisp_string *s = val.ptr;
-        return lisp_strdup (ctx, s->str);
-      }
-
-    case LISP_TAG_SYMBOL:
-      return lisp_strdup (ctx, LISP_SYMBOL_STR (val));
-
-    case LISP_TAG_LIST:
-      if (LISP_IS_NIL (val))
-        return lisp_strdup (ctx, "()");
-      /* fall through */
-
-    default:
-
-      return lisp_strdup (ctx, "#OBJECT");
     }
+
+  rv = lisp_strdup (ctx, sb.s);
+  string_buf_destroy (&sb);
+
+  return rv;
 }
 
 void
@@ -1516,15 +1599,16 @@ lisp_context_set_var (lisp_context_t *ctx, lisp_value_ref_t name,
   uint32_t key;
   struct lisp_variable *var;
   lisp_context_t *orig_ctx = ctx;
-  if (LISP_IS_EXCEPTION (name)) {
-    lisp_free_value (ctx, value);
-    return lisp_exception ();
-  }
+  if (LISP_IS_EXCEPTION (name))
+    {
+      lisp_free_value (ctx, value);
+      return lisp_exception ();
+    }
   if (!LISP_IS_SYMBOL (name))
-  {
-    lisp_free_value (ctx, value);
-    return lisp_throw_internal_error (ctx, "type error");
-  }
+    {
+      lisp_free_value (ctx, value);
+      return lisp_throw_internal_error (ctx, "type error");
+    }
 
   key = lisp_hash_str (LISP_SYMBOL_STR (name));
   while (ctx != NULL)
@@ -1796,7 +1880,8 @@ lisp_define (lisp_context_t *ctx, lisp_value_ref_t args,
  * (set! var value)
  */
 static lisp_value_t
-lisp_set_ (lisp_context_t *ctx, lisp_value_ref_t args, struct lisp_function *unused)
+lisp_set_ (lisp_context_t *ctx, lisp_value_ref_t args,
+           struct lisp_function *unused)
 {
   lisp_value_t val[2];
 
@@ -2624,9 +2709,9 @@ lisp_gc_ (lisp_context_t *ctx, int argc, lisp_value_ref_t *argv)
   return lisp_nil ();
 }
 
-
 static lisp_value_t
-lisp_begin (lisp_context_t *ctx, lisp_value_ref_t args, struct lisp_function *unused)
+lisp_begin (lisp_context_t *ctx, lisp_value_ref_t args,
+            struct lisp_function *unused)
 {
   return lisp_eval_list (ctx, args);
 }
@@ -2776,4 +2861,13 @@ lisp_eval (lisp_context_t *ctx, lisp_value_ref_t val)
     }
 
   return lisp_dup_value (ctx, val);
+}
+
+static int
+lisp_function_format (lisp_context_t *ctx, struct lisp_object *obj,
+                      struct string_buf *buf)
+{
+  struct lisp_function *func = (struct lisp_function *)obj;
+  sbprintf (buf, "[Function %s]", LISP_SYMBOL_STR (func->name));
+  return 0;
 }

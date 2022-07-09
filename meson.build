@@ -6,5 +6,6 @@ executable('lisp',
            'lisp.c',
            'main.c',
            'string_buf.c',
-           c_args : ['-std=gnu11', '-Werror=implicit-function-declaration'],
+           c_args : ['-std=gnu11', '-Werror=implicit-function-declaration',
+              '-Wno-unused-parameter'],
            install : true)

@@ -35,6 +35,7 @@ repl ()
 
       lisp_gc (rt);
 
+      fflush (stdout);
       fprintf (stderr, ">>> ");
     }
 
@@ -101,7 +102,10 @@ main (int argc, char **argv)
     int res;
     FILE *filep = fopen (argv[1], "r");
     if (!filep)
-      return 1;
+      {
+        perror (argv[1]);
+        return 1;
+      }
 
     res = interpreter (filep, argv);
     fclose (filep);
