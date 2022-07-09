@@ -1154,12 +1154,12 @@ lisp_read_form (struct lisp_reader *reader)
   if (!token)
     return lisp_throw_parse_error (reader->ctx, LISP_PE_EOF, "EOF");
 
-  if (streq (token, "("))
+  if (streq (token, "(") || streq (token, "["))
     return lisp_read_list (reader);
 
-  if (streq (token, ")"))
+  if (streq (token, ")") || streq (token, "]"))
     return lisp_throw_parse_error (reader->ctx, LISP_PE_EXPECT_RIGHT_PAREN,
-                                   "Unexpected ')'");
+                                   "Unexpected '%s'", token);
 
   if (streq (token, "'"))
     {
@@ -1182,9 +1182,15 @@ lisp_read_list (struct lisp_reader *reader)
   const char *token;
   lisp_value_t val = LISP_NIL;
   lisp_value_t *tail = &val;
+  const char *closing;
 
   token = lisp_next_token (reader);
-  assert (streq (token, "("));
+  assert (streq (token, "(") || streq(token, "["));
+
+  if (streq (token, "("))
+    closing = ")";
+  else
+    closing = "]";
 
   for (;;)
     {
@@ -1197,7 +1203,7 @@ lisp_read_list (struct lisp_reader *reader)
           goto fail;
         }
 
-      if (streq (token, ")"))
+      if (streq (token, closing))
         break;
 
       if (streq (token, "."))
@@ -1207,10 +1213,10 @@ lisp_read_list (struct lisp_reader *reader)
           if (LISP_IS_EXCEPTION (*tail))
             goto fail;
           token = lisp_next_token (reader);
-          if (!streq (token, ")"))
+          if (!streq (token, closing))
             {
               lisp_throw_parse_error (reader->ctx, LISP_PE_EXPECT_RIGHT_PAREN,
-                                      "expected ')' but got '%s'", token);
+                                      "expected '%s' but got '%s'", closing, token);
               goto fail;
             }
           return val;
@@ -1245,8 +1251,8 @@ lisp_read_atom (struct lisp_reader *reader)
   const char *token = lisp_next_token (reader);
 
   assert (!!token);
-  assert (!streq (token, "("));
-  assert (!streq (token, ")"));
+  assert (!streq (token, "(") && !streq (token, "["));
+  assert (!streq (token, ")") && !streq(token, "]"));
 
   if (isdigit (token[0]))
     {
@@ -1324,6 +1330,14 @@ lisp_do_next_token (struct lisp_reader *reader)
 
     case ')':
       reader->token = ")";
+      return 0;
+
+    case '[':
+      reader->token = "[";
+      return 0;
+
+    case ']':
+      reader->token = "]";
       return 0;
 
     case '\'':
