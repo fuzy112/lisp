@@ -50,6 +50,18 @@ struct lisp_object
   int mark_flag;
 };
 
+static void
+lisp_object_init (struct lisp_object *obj,
+                  const struct lisp_object_operations *ops)
+{
+  obj->ref_count = 1;
+  obj->ops = ops;
+  INIT_LIST_HEAD (&obj->list);
+  obj->mark_flag = LISP_MARK_BLACK;
+}
+
+#define LISP_OBJECT_INIT(type, ops) lisp_object_init (&(type)->obj, ops)
+
 struct lisp_runtime
 {
   long gc_threshold;
@@ -186,7 +198,7 @@ lisp_runtime_free (lisp_runtime_t *rt)
 
 void
 lisp_mark_value (lisp_runtime_t *rt, lisp_value_ref_t val,
-                 void mark_func (lisp_runtime_t *rt, struct lisp_object *))
+                 lisp_mark_func mark_func)
 {
   if (LISP_IS_OBJECT (val))
     {
@@ -434,7 +446,8 @@ lisp_malloc_rt (lisp_runtime_t *rt, size_t size)
   void *ptr;
   time_t now = time (NULL);
 
-  if (now - rt->last_gc > LISP_GC_INTERVAL || rt->nr_blocks >= rt->gc_threshold)
+  if (now - rt->last_gc > LISP_GC_INTERVAL
+      || rt->nr_blocks >= rt->gc_threshold)
     {
       lisp_scan_gc_list (rt);
     }
@@ -708,17 +721,24 @@ lisp_toupper (lisp_context_t *ctx, const char *str)
 lisp_value_t
 lisp_new_symbol_full (lisp_context_t *ctx, const char *name, int is_static)
 {
+  assert (name != NULL);
+
   struct lisp_symbol *sym = lisp_malloc (ctx, sizeof (*sym));
   lisp_value_t val = LISP_OBJECT (LISP_TAG_SYMBOL, sym);
 
-  assert (name != NULL);
+  if (!sym)
+    return lisp_exception ();
+
+  LISP_OBJECT_INIT (sym, &lisp_symbol_operations);
+
   sym->is_static = is_static;
   sym->name = lisp_toupper (ctx, name);
 
-  sym->obj.ref_count = 1;
-  sym->obj.ops = &lisp_symbol_operations;
-  sym->obj.mark_flag = LISP_MARK_BLACK;
-  INIT_LIST_HEAD (&sym->obj.list);
+  if (!sym->name)
+    {
+      lisp_free_value (ctx, val);
+      return lisp_exception ();
+    }
 
   return val;
 }
@@ -792,12 +812,16 @@ lisp_new_string_full (lisp_context_t *ctx, const char *s, int is_static)
   if (!str)
     return lisp_throw_out_of_memory (ctx);
 
+  LISP_OBJECT_INIT (str, &lisp_string_operations);
+
   str->is_static = is_static;
   str->str = lisp_strdup (ctx, s);
-  str->obj.ops = &lisp_string_operations;
-  str->obj.ref_count = 1;
-  str->obj.mark_flag = LISP_MARK_BLACK;
-  INIT_LIST_HEAD (&str->obj.list);
+
+  if (!str->str)
+    {
+      lisp_free_value (ctx, val);
+      return lisp_exception ();
+    }
 
   return val;
 }
@@ -895,6 +919,8 @@ lisp_new_vector (lisp_context_t *ctx, int n, lisp_value_ref_t *elems)
   if (!vec)
     return lisp_exception ();
 
+  LISP_OBJECT_INIT (vec, &lisp_vector_operations);
+
   vec->capacity = n;
   vec->length = n;
   vec->data = lisp_malloc (ctx, sizeof (lisp_value_t) * n);
@@ -909,12 +935,55 @@ lisp_new_vector (lisp_context_t *ctx, int n, lisp_value_ref_t *elems)
       vec->data[i] = lisp_dup_value (ctx, elems[i]);
     }
 
-  vec->obj.ref_count = 1;
-  vec->obj.mark_flag = LISP_MARK_BLACK;
-  INIT_LIST_HEAD (&vec->obj.list);
-  vec->obj.ops = &lisp_vector_operations;
+  return LISP_OBJECT (LISP_TAG_VECTOR, vec);
+}
+
+static lisp_value_t
+lisp_make_vector (lisp_context_t *ctx, int argc, lisp_value_ref_t *argv)
+{
+  struct lisp_vector *vec;
+  int32_t k;
+  lisp_value_t o;
+
+  if (argc < 1)
+    return lisp_throw_internal_error (ctx, "require at least one argument");
+
+  if (lisp_to_int32 (ctx, &k, argv[0]))
+    return lisp_exception ();
+
+  o = argv[1];
+
+  vec = lisp_malloc (ctx, sizeof (*vec));
+  if (!vec)
+    return lisp_exception ();
+
+  LISP_OBJECT_INIT (vec, &lisp_vector_operations);
+
+  vec->length = k;
+  vec->capacity = k;
+  vec->data = lisp_malloc (ctx, sizeof (o) * k);
+  if (!vec->data)
+    {
+      lisp_free (ctx, vec);
+      return lisp_exception ();
+    }
+
+  while (k > 0)
+    {
+      vec->data[--k] = lisp_dup_value (ctx, o);
+    }
 
   return LISP_OBJECT (LISP_TAG_VECTOR, vec);
+}
+
+static lisp_value_t
+lisp_vector_copy (lisp_context_t *ctx, int argc, lisp_value_ref_t *argv)
+{
+  struct lisp_vector *vec = lisp_get_object (ctx, argv[0], LISP_TAG_VECTOR);
+  if (!vec)
+    return lisp_exception ();
+
+  return lisp_new_vector (ctx, vec->length, vec->data);
 }
 
 static lisp_value_t
@@ -1323,7 +1392,16 @@ lisp_do_next_token (struct lisp_reader *reader)
   while ((ch = lisp_reader_getc (reader)) != EOF)
     {
       if (!isspace (ch))
-        break;
+        {
+          if (ch == ';')
+            {
+              while ((ch = lisp_reader_getc (reader)) != EOF)
+                if (ch == '\n' || ch == '\r' || ch == '\f')
+                  break;
+            }
+          else
+            break;
+        }
     }
 
   switch (ch)
@@ -1363,7 +1441,7 @@ lisp_do_next_token (struct lisp_reader *reader)
           string_buf_append_char (&reader->buf, ch);
         else if (isspace (ch))
           break;
-        else if (ch == ')' || ch == ']')
+        else if (strchr ("()[]{};'`\"|", ch))
           {
             lisp_reader_ungetc (reader, ch);
             break;
@@ -1399,7 +1477,7 @@ lisp_do_next_token (struct lisp_reader *reader)
             string_buf_append_char (&reader->buf, ch);
           else if (isspace (ch))
             break;
-          else if (ch == ')' || ch == ']')
+          else if (strchr ("()[]{};'`\"|", ch))
             {
               lisp_reader_ungetc (reader, ch);
               break;
@@ -1760,12 +1838,15 @@ static lisp_value_t
 lisp_function_invoker (lisp_context_t *ctx, lisp_value_ref_t args,
                        struct lisp_function *func)
 {
-  lisp_value_t val;
+  lisp_value_t val = lisp_exception ();
   lisp_context_t *new_ctx
       = lisp_context_new_with_parent (func->ctx, LISP_SYMBOL_STR (func->name));
-  lisp_function_set_args (ctx, new_ctx, func->params, args);
-  val = lisp_eval_list (new_ctx, func->body);
-  lisp_context_unref (new_ctx);
+  if (new_ctx)
+    {
+      if (!lisp_function_set_args (ctx, new_ctx, func->params, args))
+        val = lisp_eval_list (new_ctx, func->body);
+      lisp_context_unref (new_ctx);
+    }
   return val;
 }
 
@@ -1829,6 +1910,7 @@ lisp_cfunc_invoker (lisp_context_t *ctx, lisp_value_ref_t args,
   int argc = -1;
   lisp_value_t *argv;
   lisp_value_t val;
+  lisp_context_t *tmp_ctx;
 
   lisp_cfunc_simple *cfunc = func->cfunc;
 
@@ -1836,7 +1918,16 @@ lisp_cfunc_invoker (lisp_context_t *ctx, lisp_value_ref_t args,
   if (!argv)
     return lisp_exception ();
 
-  val = cfunc (ctx, argc, argv);
+  tmp_ctx = lisp_context_new_with_parent (ctx, "#CFUNC");
+  if (tmp_ctx)
+    {
+      val = cfunc (tmp_ctx, argc, argv);
+      lisp_context_unref (tmp_ctx);
+    }
+  else
+    {
+      val = lisp_exception ();
+    }
   lisp_free_value_array (ctx, argv, argc);
   return val;
 }
@@ -1848,18 +1939,22 @@ lisp_new_function (lisp_context_t *ctx, lisp_value_t name, lisp_value_t params,
   struct lisp_function *fn = lisp_malloc (ctx, sizeof (*fn));
   lisp_value_t val = LISP_OBJECT (LISP_TAG_LAMBDA, fn);
 
-  fn->obj.ref_count = 1;
-  fn->obj.ops = &lisp_function_operations;
-  fn->obj.mark_flag = LISP_MARK_BLACK;
-  INIT_LIST_HEAD (&fn->obj.list);
+  if (!fn)
+    return lisp_exception ();
+
+  LISP_OBJECT_INIT (fn, &lisp_function_operations);
 
   fn->params = params;
   fn->body = body;
   fn->invoker = invoker;
-
   fn->name = name;
 
   fn->ctx = lisp_context_new_with_parent (ctx, LISP_SYMBOL_STR (name));
+  if (!fn->ctx)
+    {
+      lisp_free_value (ctx, val);
+      return lisp_exception ();
+    }
 
   return val;
 }
@@ -2771,6 +2866,11 @@ lisp_eval_ (lisp_context_t *ctx, int argc, lisp_value_ref_t *argv)
   return lisp_eval (ctx, argv[0]);
 }
 
+// static lisp_value_t
+// lisp_read (lisp_context_t *ctx, int argc, lisp_value_ref_t *argv)
+// {
+// }
+
 static int
 lisp_define_cfunc (lisp_context_t *ctx, lisp_value_t name,
                    lisp_cfunc_simple *cfunc, int n)
@@ -2853,7 +2953,9 @@ lisp_new_global_context (lisp_runtime_t *rt)
 
   LISP_DEFINE_CFUNC (ctx, "EVAL", lisp_eval_, 1);
 
+  LISP_DEFINE_CFUNC (ctx, "MAKE-VECTOR", lisp_make_vector, 2);
   LISP_DEFINE_CFUNC (ctx, "VECTOR", lisp_new_vector, -1);
+  LISP_DEFINE_CFUNC (ctx, "VECTOR-COPY", lisp_vector_copy, 1);
   LISP_DEFINE_CFUNC (ctx, "VECTOR-LENGTH", lisp_vector_length, 1);
   LISP_DEFINE_CFUNC (ctx, "VECTOR-CAPACITY", lisp_vector_capacity, 1);
   LISP_DEFINE_CFUNC (ctx, "VECTOR-REF", lisp_vector_ref, 2);
