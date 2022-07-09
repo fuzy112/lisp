@@ -579,7 +579,7 @@ lisp_cons_format (lisp_context_t *ctx, struct lisp_object *obj,
   lisp_value_t car;
   lisp_value_t cdr;
 
-  string_buf_append_char (buf, '(');
+  sbprintf (buf, "'(");
 
 
   for (;;)
@@ -664,8 +664,18 @@ lisp_symbol_finalize (lisp_runtime_t *rt, struct lisp_object *obj)
     lisp_free_rt (rt, sym->name);
 }
 
+static int
+lisp_symbol_format (lisp_context_t *ctx, struct lisp_object *obj,
+    struct string_buf *buf)
+{
+  struct lisp_symbol *sym = (struct lisp_symbol *)obj;
+  string_buf_append_char (buf, '\'');
+  return string_buf_append (buf, sym->name, strlen (sym->name));
+}
+
 static const struct lisp_object_operations lisp_symbol_operations = {
   .finalize = &lisp_symbol_finalize,
+  .format = &lisp_symbol_format,
 };
 
 static char *
@@ -1075,6 +1085,16 @@ struct lisp_reader
   struct string_buf buf;
 };
 
+static int lisp_reader_getc (struct lisp_reader *reader)
+{
+  return getc (reader->filep);
+}
+
+static int lisp_reader_ungetc (struct lisp_reader *reader, int ch)
+{
+  return ungetc (ch, reader->filep);
+}
+
 static const char *lisp_next_token (struct lisp_reader *reader);
 
 static const char *lisp_peek_token (struct lisp_reader *reader);
@@ -1086,7 +1106,7 @@ static lisp_value_t lisp_read_list (struct lisp_reader *reader);
 void
 lisp_reader_init (struct lisp_reader *reader, lisp_context_t *ctx)
 {
-  reader->filep = stdin;
+  reader->filep = NULL;
   reader->ctx = ctx;
   reader->state = LISP_RS_NEXT;
   reader->token = NULL;
@@ -1282,7 +1302,7 @@ lisp_do_next_token (struct lisp_reader *reader)
 
   reader->buf.length = 0;
 
-  while ((ch = getc (reader->filep)) != EOF)
+  while ((ch = lisp_reader_getc (reader)) != EOF)
     {
       if (!isspace (ch))
         break;
@@ -1312,14 +1332,14 @@ lisp_do_next_token (struct lisp_reader *reader)
 
     case '0' ... '9':
       string_buf_append_char (&reader->buf, ch);
-      while ((ch = getc (reader->filep)) != EOF)
+      while ((ch = lisp_reader_getc (reader)) != EOF)
         if (isdigit (ch))
           string_buf_append_char (&reader->buf, ch);
         else if (isspace (ch))
           break;
         else if (ch == ')')
           {
-            ungetc (ch, reader->filep);
+            lisp_reader_ungetc (reader, ch);
             break;
           }
         else
@@ -1347,7 +1367,7 @@ lisp_do_next_token (struct lisp_reader *reader)
     case '&':
     case '#':
       string_buf_append_char (&reader->buf, ch);
-      while ((ch = getc (reader->filep)) != EOF)
+      while ((ch = lisp_reader_getc (reader)) != EOF)
         {
           if (isalnum (ch) || !!strchr ("+-*/%^><=!&?", ch))
             string_buf_append_char (&reader->buf, ch);
@@ -1355,7 +1375,7 @@ lisp_do_next_token (struct lisp_reader *reader)
             break;
           else if (ch == ')')
             {
-              ungetc (ch, reader->filep);
+              lisp_reader_ungetc (reader, ch);
               break;
             }
           else
@@ -1370,11 +1390,11 @@ lisp_do_next_token (struct lisp_reader *reader)
     case '"':
       string_buf_append_char (&reader->buf, '"');
 
-      while ((ch = getc (reader->filep)) != EOF)
+      while ((ch = lisp_reader_getc (reader)) != EOF)
         {
           if (ch == '\\')
             {
-              ch = getc (reader->filep);
+              ch = lisp_reader_getc (reader);
               if (ch == EOF)
                 break;
               if (ch == 't')
