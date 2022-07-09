@@ -99,12 +99,17 @@ lisp_object_unref (lisp_runtime_t *rt, struct lisp_object *obj)
   assert (obj);
   if (--obj->ref_count > 0)
     {
+      if (obj->ops->gc_mark == NULL)
+        return;
+
       obj->mark_flag = LISP_MARK_HATCH;
-      list_move_tail (&obj->list, &rt->gc_list);
+
+      if (list_empty (&obj->list))
+        list_move_tail (&obj->list, &rt->gc_list);
       return;
     }
 
-  list_del (&obj->list);
+  list_del_init (&obj->list);
 
   if (obj->ops->gc_mark)
     {
@@ -425,8 +430,7 @@ lisp_malloc_rt (lisp_runtime_t *rt, size_t size)
   void *ptr;
   time_t now = time (NULL);
 
-  if (now - rt->last_gc > LISP_GC_INTERVAL
-      || rt->nr_blocks >= rt->gc_threshold)
+  if (now - rt->last_gc > LISP_GC_INTERVAL)
     {
       lisp_scan_gc_list (rt);
     }
@@ -579,7 +583,7 @@ lisp_cons_format (lisp_context_t *ctx, struct lisp_object *obj,
   lisp_value_t car;
   lisp_value_t cdr;
 
-  sbprintf (buf, "'(");
+  sbprintf (buf, "(");
 
 
   for (;;)
@@ -669,7 +673,7 @@ lisp_symbol_format (lisp_context_t *ctx, struct lisp_object *obj,
     struct string_buf *buf)
 {
   struct lisp_symbol *sym = (struct lisp_symbol *)obj;
-  string_buf_append_char (buf, '\'');
+  // string_buf_append_char (buf, '\'');
   return string_buf_append (buf, sym->name, strlen (sym->name));
 }
 
