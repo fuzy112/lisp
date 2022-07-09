@@ -31,8 +31,8 @@ struct lisp_object_operations
                  struct string_buf *);
 };
 
-int lisp_value_format (lisp_context_t *ctx, lisp_value_ref_t val, struct string_buf *);
-
+int lisp_value_format (lisp_context_t *ctx, lisp_value_ref_t val,
+                       struct string_buf *);
 
 enum lisp_mark_color
 {
@@ -176,6 +176,9 @@ lisp_runtime_new (void)
 void
 lisp_runtime_free (lisp_runtime_t *rt)
 {
+  assert (LISP_IS_NIL (rt->exception_list));
+  lisp_mark_value (rt, rt->exception_list, lisp_object_unref);
+
   assert (rt->nr_blocks == 0);
   assert (list_empty (&rt->gc_list));
   free (rt);
@@ -299,6 +302,7 @@ lisp_scan_gc_list (lisp_runtime_t *rt)
 
   list_for_each_entry_safe (obj, tmp, &rt->tmp_list, list)
     {
+      list_del (&obj->list);
       lisp_free_rt (rt, obj);
     }
 
@@ -430,7 +434,7 @@ lisp_malloc_rt (lisp_runtime_t *rt, size_t size)
   void *ptr;
   time_t now = time (NULL);
 
-  if (now - rt->last_gc > LISP_GC_INTERVAL)
+  if (now - rt->last_gc > LISP_GC_INTERVAL || rt->nr_blocks >= rt->gc_threshold)
     {
       lisp_scan_gc_list (rt);
     }
@@ -585,15 +589,15 @@ lisp_cons_format (lisp_context_t *ctx, struct lisp_object *obj,
 
   sbprintf (buf, "(");
 
-
   for (;;)
     {
       car = cons->car;
       cdr = cons->cdr;
 
-      if (!is_first) {
-        string_buf_append_char (buf, ' ');
-      }
+      if (!is_first)
+        {
+          string_buf_append_char (buf, ' ');
+        }
       is_first = 0;
       lisp_value_format (ctx, car, buf);
 
@@ -670,7 +674,7 @@ lisp_symbol_finalize (lisp_runtime_t *rt, struct lisp_object *obj)
 
 static int
 lisp_symbol_format (lisp_context_t *ctx, struct lisp_object *obj,
-    struct string_buf *buf)
+                    struct string_buf *buf)
 {
   struct lisp_symbol *sym = (struct lisp_symbol *)obj;
   // string_buf_append_char (buf, '\'');
@@ -1055,6 +1059,7 @@ lisp_get_exception (lisp_context_t *ctx)
 void
 lisp_print_exception (lisp_context_t *ctx)
 {
+  // lisp_print_value (ctx, ctx->runtime->exception_list);
   lisp_value_t error = lisp_get_exception (ctx);
   if (LISP_IS_EXCEPTION (error))
     abort ();
@@ -1089,12 +1094,14 @@ struct lisp_reader
   struct string_buf buf;
 };
 
-static int lisp_reader_getc (struct lisp_reader *reader)
+static int
+lisp_reader_getc (struct lisp_reader *reader)
 {
   return getc (reader->filep);
 }
 
-static int lisp_reader_ungetc (struct lisp_reader *reader, int ch)
+static int
+lisp_reader_ungetc (struct lisp_reader *reader, int ch)
 {
   return ungetc (ch, reader->filep);
 }
@@ -1185,7 +1192,7 @@ lisp_read_list (struct lisp_reader *reader)
   const char *closing;
 
   token = lisp_next_token (reader);
-  assert (streq (token, "(") || streq(token, "["));
+  assert (streq (token, "(") || streq (token, "["));
 
   if (streq (token, "("))
     closing = ")";
@@ -1216,7 +1223,8 @@ lisp_read_list (struct lisp_reader *reader)
           if (!streq (token, closing))
             {
               lisp_throw_parse_error (reader->ctx, LISP_PE_EXPECT_RIGHT_PAREN,
-                                      "expected '%s' but got '%s'", closing, token);
+                                      "expected '%s' but got '%s'", closing,
+                                      token);
               goto fail;
             }
           return val;
@@ -1252,7 +1260,7 @@ lisp_read_atom (struct lisp_reader *reader)
 
   assert (!!token);
   assert (!streq (token, "(") && !streq (token, "["));
-  assert (!streq (token, ")") && !streq(token, "]"));
+  assert (!streq (token, ")") && !streq (token, "]"));
 
   if (isdigit (token[0]))
     {
@@ -1355,7 +1363,7 @@ lisp_do_next_token (struct lisp_reader *reader)
           string_buf_append_char (&reader->buf, ch);
         else if (isspace (ch))
           break;
-        else if (ch == ')')
+        else if (ch == ')' || ch == ']')
           {
             lisp_reader_ungetc (reader, ch);
             break;
@@ -1391,7 +1399,7 @@ lisp_do_next_token (struct lisp_reader *reader)
             string_buf_append_char (&reader->buf, ch);
           else if (isspace (ch))
             break;
-          else if (ch == ')')
+          else if (ch == ')' || ch == ']')
             {
               lisp_reader_ungetc (reader, ch);
               break;
@@ -1467,6 +1475,7 @@ lisp_next_token (struct lisp_reader *reader)
   else
     {
       lisp_do_next_token (reader);
+      // printf ("token : %s\n", reader->token);
       return reader->token;
     }
 }
@@ -1477,6 +1486,7 @@ lisp_peek_token (struct lisp_reader *reader)
   if (reader->state == LISP_RS_NEXT)
     {
       lisp_do_next_token (reader);
+      // printf ("token : %s\n", reader->token);
 
       reader->state = LISP_RS_PEEK;
       return reader->token;
@@ -1578,7 +1588,7 @@ lisp_to_int32 (lisp_context_t *ctx, int32_t *result, lisp_value_ref_t val)
     *result = (int32_t)val.i64;
   else
     {
-      lisp_throw_internal_error (ctx, "Value error: %d", val.tag);
+      lisp_throw_internal_error (ctx, "Value error: %i", val.tag);
       return -1;
     }
   return 0;
@@ -1734,7 +1744,7 @@ lisp_eval_list (lisp_context_t *ctx, lisp_value_ref_t list)
 {
   lisp_value_t val = LISP_NIL;
   lisp_dup_value (ctx, list);
-  while (!LISP_IS_NIL (list))
+  while (!LISP_IS_NIL (list) && !LISP_IS_EXCEPTION (val))
     {
       lisp_value_t exp = lisp_car (ctx, list);
       list = lisp_cdr_take (ctx, list);
@@ -2244,7 +2254,7 @@ static int
 lisp_do_dump_context (lisp_context_t *ctx)
 {
   size_t bucket;
-  long long nr_variables = 0;
+  uint64_t nr_variables = 0;
   struct lisp_variable *var;
 
   hash_for_each (ctx->var_table, bucket, var, node)
@@ -2253,7 +2263,7 @@ lisp_do_dump_context (lisp_context_t *ctx)
     }
 
   printf ("context [ name = %s, "
-          "nr_variables: %lld ]\n",
+          "nr_variables: %" PRIu64 " ]\n",
           ctx->name, nr_variables);
   return 0;
 }
@@ -2323,7 +2333,8 @@ lisp_do_print_car (lisp_context_t *ctx, lisp_value_ref_t list)
     }
 
   char *str = lisp_value_to_string (ctx, val);
-  printf ("%s", str);
+  if (str)
+    printf ("%s", str);
   lisp_free (ctx, str);
   lisp_free_value (ctx, val);
   lisp_free_value (ctx, expr);
@@ -2754,6 +2765,12 @@ lisp_begin (lisp_context_t *ctx, lisp_value_ref_t args,
   return lisp_eval_list (ctx, args);
 }
 
+static lisp_value_t
+lisp_eval_ (lisp_context_t *ctx, int argc, lisp_value_ref_t *argv)
+{
+  return lisp_eval (ctx, argv[0]);
+}
+
 static int
 lisp_define_cfunc (lisp_context_t *ctx, lisp_value_t name,
                    lisp_cfunc_simple *cfunc, int n)
@@ -2834,6 +2851,8 @@ lisp_new_global_context (lisp_runtime_t *rt)
   LISP_DEFINE_MACRO (ctx, "COND", nil, &lisp_cond);
   LISP_DEFINE_MACRO (ctx, "BEGIN", nil, &lisp_begin);
 
+  LISP_DEFINE_CFUNC (ctx, "EVAL", lisp_eval_, 1);
+
   LISP_DEFINE_CFUNC (ctx, "VECTOR", lisp_new_vector, -1);
   LISP_DEFINE_CFUNC (ctx, "VECTOR-LENGTH", lisp_vector_length, 1);
   LISP_DEFINE_CFUNC (ctx, "VECTOR-CAPACITY", lisp_vector_capacity, 1);
@@ -2908,4 +2927,11 @@ lisp_function_format (lisp_context_t *ctx, struct lisp_object *obj,
   struct lisp_function *func = (struct lisp_function *)obj;
   sbprintf (buf, "[Function %s]", LISP_SYMBOL_STR (func->name));
   return 0;
+}
+
+lisp_typeid
+lisp_alloc_typeid (void)
+{
+  static lisp_typeid id = 129;
+  return id++;
 }

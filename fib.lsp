@@ -6,4 +6,5 @@
 
 (print (fib 28))
 
+(gc)
 (dump-runtime)

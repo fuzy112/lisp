@@ -22,14 +22,18 @@ enum lisp_tag
 
   LISP_TAG_LAMBDA,
   LISP_TAG_VECTOR,
+
+  LISP_TAG_END,
 };
+
+typedef int lisp_typeid; 
 
 typedef struct lisp_value
 {
   union
   {
     enum lisp_tag tag;
-    int tag_int;
+    lisp_typeid tag_int;
   };
   union
   {
@@ -174,5 +178,7 @@ void lisp_mark_context (lisp_runtime_t *rt, lisp_context_t *ctx,
                                         struct lisp_object *));
 
 void lisp_gc (lisp_runtime_t *rt);
+
+lisp_typeid lisp_alloc_typeid (void);
 
 #endif // LISP_H
