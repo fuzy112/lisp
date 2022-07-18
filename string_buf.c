@@ -2,11 +2,12 @@
 #include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
+#include <gc.h>
 
 void
 string_buf_destroy (struct string_buf *buf)
 {
-  free (buf->s);
+  GC_FREE (buf->s);
 }
 
 int
@@ -26,7 +27,7 @@ string_buf_append (struct string_buf *buf, const char *str, size_t len)
         }
     }
 
-  tmp = realloc (buf->s, buf->capacity);
+  tmp = GC_REALLOC (buf->s, buf->capacity);
   if (!tmp)
     return -1;
   buf->s = tmp;

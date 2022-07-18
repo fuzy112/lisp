@@ -5,6 +5,8 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <gc.h>
+#include <editline/readline.h>
 
 static int
 repl ()
@@ -16,9 +18,10 @@ repl ()
   lisp_value_t exp;
   lisp_value_t val;
 
-  fprintf (stderr, ">>> ");
   while (!feof (stdin))
     {
+      fprintf (stderr, ">>> ");
+      
       exp = lisp_read_form (reader);
       if (LISP_IS_EXCEPTION (exp)) {
         lisp_print_exception (ctx);
@@ -30,19 +33,8 @@ repl ()
         lisp_print_exception (ctx);
       else
         lisp_print_value (ctx, val);
-      lisp_free_value (ctx, val);
-      lisp_free_value (ctx, exp);
-
-      lisp_gc (rt);
-
       fflush (stdout);
-      fprintf (stderr, ">>> ");
     }
-
-  lisp_reader_free (reader);
-  lisp_context_unref (ctx);
-  lisp_gc (rt);
-  lisp_runtime_free (rt);
 
   return 0;
 }
@@ -50,6 +42,8 @@ repl ()
 static int
 interpreter (FILE *filep, char **args)
 {
+  GC_INIT();
+
   lisp_runtime_t *rt = lisp_runtime_new ();
   lisp_context_t *ctx = lisp_new_global_context (rt);
   lisp_reader_t *reader = lisp_reader_new (ctx, filep);
@@ -64,28 +58,15 @@ interpreter (FILE *filep, char **args)
         goto fail;
 
       val = lisp_eval (ctx, expr);
-      lisp_free_value (ctx, expr);
       if (LISP_IS_EXCEPTION (val))
         goto fail;
 
-      lisp_free_value (ctx, val);
     }
-
-  lisp_reader_free (reader);
-  lisp_context_unref (ctx);
-  lisp_gc (rt);
-  lisp_runtime_free (rt);
 
   return 0;
 
 fail:
   lisp_print_exception (ctx);
-
-  lisp_reader_free (reader);
-
-  lisp_context_unref (ctx);
-  lisp_gc (rt);
-  lisp_runtime_free (rt);
 
   return -1;
 }

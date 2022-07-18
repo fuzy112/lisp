@@ -5,43 +5,19 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-enum lisp_tag
-{
-  LISP_TAG_EXCEPTION,
-
-  LISP_TAG_BOOLEAN,
-
-  LISP_TAG_INT32,
-  LISP_TAG_INT64,
-  LISP_TAG_REAL,
-
-  LISP_TAG_SYMBOL,
-  LISP_TAG_STRING,
-
-  LISP_TAG_LIST,
-
-  LISP_TAG_LAMBDA,
-  LISP_TAG_VECTOR,
-
-  LISP_TAG_END,
+enum lisp_value_tag {
+  LISP_TAG_EXCEPTION = 1,
+  LISP_TAG_VOID = 2,
+  LISP_TAG_INT = 3,
+  LISP_TAG_BOOL = 4,
 };
 
-typedef int lisp_typeid; 
-
-typedef struct lisp_value
-{
-  union
-  {
-    enum lisp_tag tag;
-    lisp_typeid tag_int;
+typedef union {
+  struct {
+    uintptr_t tag : 3;
+    uintptr_t i : 61;
   };
-  union
-  {
-    int32_t i32;
-    int64_t i64;
-    double real;
-    void *ptr;
-  };
+  void *ptr;
 } lisp_value_t, lisp_value_ref_t;
 
 typedef struct lisp_context lisp_context_t;
@@ -51,70 +27,45 @@ lisp_runtime_t *lisp_runtime_new ();
 void lisp_runtime_free (lisp_runtime_t *rt);
 
 lisp_context_t *lisp_context_new (lisp_runtime_t *rt, const char *name);
-lisp_context_t *lisp_context_ref (lisp_context_t *ctx);
-void lisp_context_unref (lisp_context_t *ctx);
 
 lisp_runtime_t *lisp_get_runtime (lisp_context_t *ctx);
 
 void *lisp_malloc (lisp_context_t *ctx, size_t size);
-void lisp_free (lisp_context_t *ctx, void *p);
-
 char *lisp_strdup_rt (lisp_runtime_t *rt, char const *s);
 
 void *lisp_malloc_rt (lisp_runtime_t *ctx, size_t size);
-void lisp_free_rt (lisp_runtime_t *ctx, void *p);
-
-lisp_value_t lisp_dup_value (lisp_context_t *ctx, lisp_value_t val);
-void lisp_free_value (lisp_context_t *ctx, lisp_value_t val);
 
 lisp_value_t lisp_eval (lisp_context_t *ctx, lisp_value_ref_t exp);
 
-#define LISP_NIL                                                              \
-  {                                                                           \
-    { .tag = LISP_TAG_LIST }, { .ptr = 0 }                                    \
-  }
+#define LISP_NIL (lisp_value_t) { .ptr = NULL }
+
 #define LISP_INT32(val)                                                       \
-  {                                                                           \
-    { .tag = LISP_TAG_INT32 }, { .i32 = (val) }                               \
-  }
-#define LISP_INT64(val)                                                       \
-  {                                                                           \
-    { .tag = LISP_TAG_INT64 }, { .i64 = (val) }                               \
-  }
-#define LISP_REAL(val)                                                        \
-  {                                                                           \
-    { .tag = LISP_TAG_REAL }, { .real = (val) }                               \
+  (lisp_value_t){							\
+    .tag = LISP_TAG_INT, .i = (val)					\
   }
 
 #define LISP_EXCEPTION                                                        \
-  {                                                                           \
-    { .tag = LISP_TAG_EXCEPTION }, { .i32 = 0xffffffff },                     \
-  }
+  (lisp_value_t){							\
+    .tag = LISP_TAG_EXCEPTION,  .i = 0xffffff				\
+      }
 
 #define LISP_TRUE                                                             \
-  {                                                                           \
-    { .tag = LISP_TAG_BOOLEAN }, { .i32 = 1 }                                 \
-  }
-#define LISP_FALSE                                                            \
-  {                                                                           \
-    { .tag = LISP_TAG_BOOLEAN }, { .i32 = 0 }                                 \
-  }
-
-#define LISP_OBJECT(Tag, Pointer)                                             \
-  ((lisp_value_t){ { .tag = (Tag) }, { .ptr = (Pointer) } })
+  (lisp_value_t) {							\
+    .tag = LISP_TAG_BOOL, .i = 1					\
+      }
+#define LISP_FALSE					\
+  (lisp_value_t) { .tag = LISP_TAG_BOOL, .i = 0 }
 
 #define LISP_IS_EXCEPTION(val) ((val).tag == LISP_TAG_EXCEPTION)
 
-#define LISP_IS_LIST(val) ((val).tag == LISP_TAG_LIST)
-#define LISP_IS_NIL(val) ((val).tag == LISP_TAG_LIST && (val).ptr == NULL)
+#define LISP_IS_NIL(val) ((val).ptr == NULL)
 
-#define LISP_IS_ATOM(val) ((val).tag < LISP_TAG_LIST)
+#define LISP_IS_PTR(val)			\
+  ((val).tag == 0)
 
-#define LISP_IS_SYMBOL(val) ((val).tag == LISP_TAG_SYMBOL)
+#define LISP_IS_INT(val) ((val).tag == LISP_TAG_INT)
 
-#define LISP_IS_OBJECT(val)                                                   \
-  ((val).tag != LISP_TAG_INT32 && (val).tag != LISP_TAG_INT64                 \
-   && (val).tag != LISP_TAG_BOOLEAN && ((val).tag != LISP_TAG_EXCEPTION))
+#define LISP_IS_BOOL(val) ((val).tag == LISP_TAG_BOOL)
 
 int lisp_to_bool (lisp_context_t *ctx, lisp_value_ref_t v, int *res);
 
@@ -127,7 +78,7 @@ lisp_value_t lisp_new_int32 (lisp_context_t *ctx, int32_t v);
 lisp_value_t lisp_new_cons (lisp_context_t *ctx, lisp_value_t car,
                             lisp_value_t cdr);
 
-lisp_value_t lisp_new_symbol (lisp_context_t *ctx, const char *name);
+lisp_value_t lisp_interned_symbol (lisp_context_t *ctx, const char *name);
 
 lisp_value_t lisp_new_symbol_full (lisp_context_t *ctx, const char *name,
                                    int is_static);
@@ -168,17 +119,5 @@ lisp_reader_t *lisp_reader_new (lisp_context_t *ctx, FILE *filep);
 void lisp_reader_free (lisp_reader_t *reader);
 lisp_value_t lisp_read_form (lisp_reader_t *reader);
 
-struct lisp_object;
-
-void lisp_mark_value (lisp_runtime_t *rt, lisp_value_ref_t val,
-                      void gc_mark_func (lisp_runtime_t *,
-                                         struct lisp_object *));
-void lisp_mark_context (lisp_runtime_t *rt, lisp_context_t *ctx,
-                        void mark_func (lisp_runtime_t *,
-                                        struct lisp_object *));
-
-void lisp_gc (lisp_runtime_t *rt);
-
-lisp_typeid lisp_alloc_typeid (void);
 
 #endif // LISP_H
