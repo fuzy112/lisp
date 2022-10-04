@@ -5,15 +5,18 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-enum lisp_value_tag {
+enum lisp_value_tag
+{
   LISP_TAG_EXCEPTION = 1,
   LISP_TAG_VOID = 2,
   LISP_TAG_INT = 3,
   LISP_TAG_BOOL = 4,
 };
 
-typedef union {
-  struct {
+typedef union
+{
+  struct
+  {
     uintptr_t tag : 3;
     uintptr_t i : 61;
   };
@@ -37,31 +40,25 @@ void *lisp_malloc_rt (lisp_runtime_t *ctx, size_t size);
 
 lisp_value_t lisp_eval (lisp_context_t *ctx, lisp_value_ref_t exp);
 
-#define LISP_NIL (lisp_value_t) { .ptr = NULL }
+#define LISP_NIL                                                              \
+  (lisp_value_t) { .ptr = NULL }
 
 #define LISP_INT32(val)                                                       \
-  (lisp_value_t){							\
-    .tag = LISP_TAG_INT, .i = (val)					\
-  }
+  (lisp_value_t) { .tag = LISP_TAG_INT, .i = (val) }
 
 #define LISP_EXCEPTION                                                        \
-  (lisp_value_t){							\
-    .tag = LISP_TAG_EXCEPTION,  .i = 0xffffff				\
-      }
+  (lisp_value_t) { .tag = LISP_TAG_EXCEPTION, .i = 0xffffff }
 
 #define LISP_TRUE                                                             \
-  (lisp_value_t) {							\
-    .tag = LISP_TAG_BOOL, .i = 1					\
-      }
-#define LISP_FALSE					\
+  (lisp_value_t) { .tag = LISP_TAG_BOOL, .i = 1 }
+#define LISP_FALSE                                                            \
   (lisp_value_t) { .tag = LISP_TAG_BOOL, .i = 0 }
 
 #define LISP_IS_EXCEPTION(val) ((val).tag == LISP_TAG_EXCEPTION)
 
 #define LISP_IS_NIL(val) ((val).ptr == NULL)
 
-#define LISP_IS_PTR(val)			\
-  ((val).tag == 0)
+#define LISP_IS_PTR(val) ((val).tag == 0)
 
 #define LISP_IS_INT(val) ((val).tag == LISP_TAG_INT)
 
@@ -118,6 +115,5 @@ typedef struct lisp_reader lisp_reader_t;
 lisp_reader_t *lisp_reader_new (lisp_context_t *ctx, FILE *filep);
 void lisp_reader_free (lisp_reader_t *reader);
 lisp_value_t lisp_read_form (lisp_reader_t *reader);
-
 
 #endif // LISP_H

@@ -8,13 +8,13 @@
 #include <assert.h>
 #include <ctype.h>
 #include <errno.h>
+#include <gc.h>
 #include <inttypes.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
-#include <gc.h>
 
 #define LISP_INTERNED_SYM_TABLE_BITS 11
 #define LISP_VAR_TABLE_BITS 8
@@ -23,9 +23,11 @@
 
 struct lisp_object;
 
-#define LISP_MAKE_PTR(obj) (lisp_value_t) { .ptr = (obj) }
+#define LISP_MAKE_PTR(obj)                                                    \
+  (lisp_value_t) { .ptr = (obj) }
 
-enum lisp_class_id {
+enum lisp_class_id
+{
   LISP_CLASS_FUNCTION = 1,
   LISP_CLASS_SYNTAX,
   LISP_CLASS_STRING,
@@ -37,7 +39,7 @@ enum lisp_class_id {
 
 struct lisp_object_class
 {
-  int class_id;
+  uintptr_t class_id;
   int (*format) (lisp_context_t *ctx, struct lisp_object *,
                  struct string_buf *);
 };
@@ -51,8 +53,7 @@ struct lisp_object
 };
 
 static void
-lisp_object_init (struct lisp_object *obj,
-                  const struct lisp_object_class *ops)
+lisp_object_init (struct lisp_object *obj, const struct lisp_object_class *ops)
 {
   obj->ops = ops;
 }
@@ -103,8 +104,7 @@ struct lisp_function
 static int lisp_function_format (lisp_context_t *ctx, struct lisp_object *obj,
                                  struct string_buf *buf);
 
-
-static const struct lisp_object_class lisp_function_operations = {
+static const struct lisp_object_class lisp_function_class = {
   .class_id = LISP_CLASS_FUNCTION,
   .format = lisp_function_format,
 };
@@ -126,10 +126,6 @@ lisp_nil (void)
 
 static int lisp_install_default_symbols (lisp_runtime_t *rt);
 
-static void lisp_remove_default_symbols (lisp_runtime_t *rt)
-{
-  assert (0 && "not implemented");
-}
 
 lisp_runtime_t *
 lisp_runtime_new (void)
@@ -149,8 +145,7 @@ lisp_runtime_free (lisp_runtime_t *rt)
   GC_FREE (rt);
 }
 
-
-static const struct lisp_object_class lisp_context_operations = {
+static const struct lisp_object_class lisp_context_class = {
   .class_id = LISP_CLASS_CONTEXT,
 };
 
@@ -158,7 +153,7 @@ static int
 lisp_context_init (struct lisp_context *ctx, lisp_runtime_t *rt,
                    const char *name, lisp_context_t *parent)
 {
-  ctx->obj.ops = &lisp_context_operations;
+  ctx->obj.ops = &lisp_context_class;
   hash_init (ctx->var_table);
   ctx->parent = NULL;
   ctx->runtime = rt;
@@ -196,11 +191,7 @@ lisp_get_runtime (lisp_context_t *ctx)
 void *
 lisp_malloc_rt (lisp_runtime_t *rt, size_t size)
 {
-  void *ptr;
-  time_t now = time (NULL);
-
-  ptr = GC_MALLOC (size);
-  return ptr;
+  return GC_MALLOC (size);
 }
 
 void *
@@ -237,28 +228,32 @@ lisp_get_object (lisp_context_t *ctx, lisp_value_ref_t val, unsigned tag)
 
   {
     struct lisp_object *obj = val.ptr;
-    if (obj->ops->class_id != tag) {
-      lisp_throw_internal_error(ctx, "Object class mismatch");
-      return NULL;
-    }
+    if (obj->ops->class_id != tag)
+      {
+        lisp_throw_internal_error (ctx, "Object class mismatch");
+        return NULL;
+      }
   }
 
   return val.ptr;
 }
 
-static bool lisp_is_class (lisp_value_t val, int class_id)
+static bool
+lisp_is_class (lisp_value_t val, uintptr_t class_id)
 {
-  if (val.tag == 0) {
-    struct lisp_object *obj = val.ptr;
-    if (obj)
-      return obj->ops->class_id == class_id;
-  }
+  if (val.tag == 0)
+    {
+      struct lisp_object *obj = val.ptr;
+      if (obj)
+        return obj->ops->class_id == class_id;
+    }
   return false;
 }
 
-#define LISP_IS_LIST(val) (LISP_IS_NIL((val)) || (lisp_is_class((val), LISP_CLASS_PAIR)))
-#define LISP_IS_SYMBOL(val) (lisp_is_class((val), LISP_CLASS_SYMBOL))
-#define LISP_IS_STRING(val) (lisp_is_class((val), LISP_CLASS_STRING))
+#define LISP_IS_LIST(val)                                                     \
+  (LISP_IS_NIL ((val)) || (lisp_is_class ((val), LISP_CLASS_PAIR)))
+#define LISP_IS_SYMBOL(val) (lisp_is_class ((val), LISP_CLASS_SYMBOL))
+#define LISP_IS_STRING(val) (lisp_is_class ((val), LISP_CLASS_STRING))
 
 struct lisp_cons
 {
@@ -332,7 +327,7 @@ lisp_cons_format (lisp_context_t *ctx, struct lisp_object *obj,
     }
 }
 
-static const struct lisp_object_class lisp_cons_operations = {
+static const struct lisp_object_class lisp_cons_class = {
   .class_id = LISP_CLASS_PAIR,
   .format = lisp_cons_format,
 };
@@ -341,7 +336,7 @@ static int
 lisp_cons_init (lisp_context_t *ctx, struct lisp_cons *cons, lisp_value_t car,
                 lisp_value_t cdr)
 {
-  cons->obj.ops = &lisp_cons_operations;
+  cons->obj.ops = &lisp_cons_class;
 
   cons->car = car;
   cons->cdr = cdr;
@@ -368,7 +363,7 @@ lisp_new_cons (lisp_context_t *ctx, lisp_value_t car, lisp_value_t cdr)
       return lisp_exception ();
     }
 
-  return LISP_MAKE_PTR(cons);
+  return LISP_MAKE_PTR (cons);
 }
 
 static char *
@@ -412,7 +407,7 @@ struct lisp_syntax
   lisp_syntax_func_t *func;
 };
 
-static const struct lisp_object_class lisp_syntax_operations = {
+static const struct lisp_object_class lisp_syntax_class = {
   .class_id = LISP_CLASS_SYNTAX,
 };
 
@@ -421,7 +416,7 @@ lisp_syntax_init (lisp_context_t *ctx, struct lisp_syntax *syntax,
                   lisp_syntax_func_t func, int magic, lisp_value_t *data,
                   int n)
 {
-  LISP_OBJECT_INIT (syntax, &lisp_syntax_operations);
+  LISP_OBJECT_INIT (syntax, &lisp_syntax_class);
   syntax->magic = magic;
   syntax->func = func;
   syntax->data = lisp_malloc (ctx, sizeof (*data) * n);
@@ -440,7 +435,7 @@ lisp_new_syntax (lisp_context_t *ctx, lisp_syntax_func_t func, int magic,
   if (lisp_syntax_init (ctx, syntax, func, magic, data, n))
     goto fail;
 
-  return LISP_MAKE_PTR(syntax);
+  return LISP_MAKE_PTR (syntax);
 
 fail:
   return lisp_exception ();
@@ -475,7 +470,7 @@ lisp_symbol_format (lisp_context_t *ctx, struct lisp_object *obj,
   return string_buf_append (buf, sym->name, strlen (sym->name));
 }
 
-static const struct lisp_object_class lisp_symbol_operations = {
+static const struct lisp_object_class lisp_symbol_class = {
   .class_id = LISP_CLASS_SYMBOL,
   .format = &lisp_symbol_format,
 };
@@ -495,7 +490,7 @@ lisp_interned_symbol (lisp_context_t *ctx, const char *name)
     {
       if (streq (sym->name, name))
         {
-          return LISP_MAKE_PTR(sym);
+          return LISP_MAKE_PTR (sym);
         }
     }
 
@@ -503,7 +498,7 @@ lisp_interned_symbol (lisp_context_t *ctx, const char *name)
   if (!sym)
     return lisp_exception ();
 
-  LISP_OBJECT_INIT (sym, &lisp_symbol_operations);
+  LISP_OBJECT_INIT (sym, &lisp_symbol_class);
 
   sym->name = lisp_toupper (ctx, name);
   if (sym->name == NULL)
@@ -516,7 +511,7 @@ lisp_interned_symbol (lisp_context_t *ctx, const char *name)
 
   hash_add (rt->interned_sym_table, &sym->snode, key);
 
-  return LISP_MAKE_PTR(sym);
+  return LISP_MAKE_PTR (sym);
 
 fail:
   return lisp_exception ();
@@ -525,7 +520,7 @@ fail:
 #define LISP_SYMBOL_DEF(name_, value)                                         \
   { \
     .obj = { \
-      .ops = &lisp_symbol_operations, \
+      .ops = &lisp_symbol_class, \
     }, \
     .index = LISP_SYMBOL_##name_,  \
     .is_static = 1, \
@@ -562,9 +557,9 @@ lisp_eqv (lisp_value_ref_t a, lisp_value_ref_t b)
   if (a.tag != b.tag)
     return 0;
 
-  if (LISP_IS_BOOL(a))
+  if (LISP_IS_BOOL (a))
     return (a.i && b.i) || (!a.i && !b.i);
-  if (LISP_IS_INT(a))
+  if (LISP_IS_INT (a))
     return a.i == b.i;
   assert (LISP_IS_PTR (a));
   return a.ptr == b.ptr;
@@ -590,7 +585,7 @@ lisp_string_format (lisp_context_t *ctx, struct lisp_object *obj,
   return 0;
 }
 
-static const struct lisp_object_class lisp_string_operations = {
+static const struct lisp_object_class lisp_string_class = {
   .class_id = LISP_CLASS_STRING,
   .format = &lisp_string_format,
 };
@@ -599,11 +594,11 @@ lisp_value_t
 lisp_new_string_full (lisp_context_t *ctx, const char *s, int is_static)
 {
   struct lisp_string *str = lisp_malloc (ctx, sizeof (*str));
-  lisp_value_t val = LISP_MAKE_PTR(str);
+  lisp_value_t val = LISP_MAKE_PTR (str);
   if (!str)
     return lisp_throw_out_of_memory (ctx);
 
-  LISP_OBJECT_INIT (str, &lisp_string_operations);
+  LISP_OBJECT_INIT (str, &lisp_string_class);
 
   str->is_static = is_static;
   str->str = lisp_strdup (ctx, s);
@@ -636,17 +631,18 @@ lisp_new_string_len (lisp_context_t *ctx, const char *n, size_t len)
 
 #define LISP_STRING_OBJECT_INIT(name, value)                                  \
   {                                                                           \
-    { &lisp_string_operations, },					\
+    {                                                                         \
+      &lisp_string_class,                                                \
+    },                                                                        \
         1, (char *)(value)                                                    \
-      }
+  }
 
 #define LISP_DEFINE_STRING_OBJECT(name, value)                                \
   struct lisp_string name = LISP_STRING_OBJECT_INIT (name, value)
 
 #define LISP_DEFINE_STRING(name, value)                                       \
   static LISP_DEFINE_STRING_OBJECT (static_string_##name, value);             \
-  static lisp_value_t name                                                    \
-  = LISP_MAKE_PTR (&static_string_##name);
+  static lisp_value_t name = LISP_MAKE_PTR (&static_string_##name);
 
 static size_t
 lisp_list_length (lisp_context_t *ctx, lisp_value_ref_t list)
@@ -665,7 +661,7 @@ lisp_value_t
 lisp_throw (lisp_context_t *ctx, lisp_value_t error)
 {
   lisp_runtime_t *rt = lisp_get_runtime (ctx);
-  printf("%s: throwing ", ctx->name);
+  printf ("%s: throwing ", ctx->name);
   lisp_print_value (ctx, error);
   rt->exception_list = lisp_new_cons (ctx, error, rt->exception_list);
   return lisp_exception ();
@@ -834,7 +830,6 @@ lisp_reader_new (lisp_context_t *ctx, FILE *filep)
 void
 lisp_reader_free (lisp_reader_t *reader)
 {
-  lisp_context_t *ctx = reader->ctx;
   lisp_reader_destroy (reader);
 }
 
@@ -950,15 +945,14 @@ lisp_read_atom (struct lisp_reader *reader)
     {
       if (strchr (token, '.'))
         {
-          char *endptr = NULL;
-          double n = strtod (token, &endptr);
-          if (endptr != strend (token))
-            return lisp_throw_parse_error (
-                reader->ctx, LISP_PE_INVALID_NUMBER_LITERAL,
-                "invalid number literal: %s", token);
-          //return lisp_new_real (reader->ctx, n);
-	  assert(0);
-	 
+          /* char *endptr = NULL; */
+          /* double n = strtod (token, &endptr); */
+          /* if (endptr != strend (token)) */
+          /*   return lisp_throw_parse_error ( */
+          /*       reader->ctx, LISP_PE_INVALID_NUMBER_LITERAL, */
+          /*       "invalid number literal: %s", token); */
+          /* return lisp_new_real (reader->ctx, n); */
+          assert (0);
         }
       else
         {
@@ -1212,12 +1206,12 @@ lisp_value_format (lisp_context_t *ctx, lisp_value_ref_t val,
         }
     }
 
-  if (LISP_IS_INT(val))
+  if (LISP_IS_INT (val))
     {
-      return sbprintf (buf, "%" PRIi32, val.i);
+      return sbprintf (buf, "%" PRIuPTR, (uintptr_t)val.i);
     }
 
-  if (LISP_IS_BOOL(val))
+  if (LISP_IS_BOOL (val))
     {
       if (val.i)
         {
@@ -1271,7 +1265,7 @@ lisp_to_int32 (lisp_context_t *ctx, int32_t *result, lisp_value_ref_t val)
 {
   if (LISP_IS_EXCEPTION (val))
     return -1;
-  if (LISP_IS_INT(val))
+  if (LISP_IS_INT (val))
     *result = val.i;
   else
     {
@@ -1445,7 +1439,7 @@ static lisp_value_t
 lisp_eval_list (lisp_context_t *ctx, lisp_value_ref_t list)
 {
   lisp_value_t val = LISP_NIL;
-   while (!LISP_IS_NIL (list) && !LISP_IS_EXCEPTION (val))
+  while (!LISP_IS_NIL (list) && !LISP_IS_EXCEPTION (val))
     {
       lisp_value_t exp = lisp_car (ctx, list);
       list = lisp_cdr (ctx, list);
@@ -1541,12 +1535,12 @@ lisp_new_function (lisp_context_t *ctx, lisp_value_t name, lisp_value_t params,
                    lisp_value_t body, lisp_native_invoke_t invoker)
 {
   struct lisp_function *fn = lisp_malloc (ctx, sizeof (*fn));
-  lisp_value_t val = LISP_MAKE_PTR(fn);
+  lisp_value_t val = LISP_MAKE_PTR (fn);
 
   if (!fn)
     return lisp_exception ();
 
-  LISP_OBJECT_INIT (fn, &lisp_function_operations);
+  LISP_OBJECT_INIT (fn, &lisp_function_class);
 
   fn->params = params;
   fn->body = body;
@@ -1573,7 +1567,8 @@ lisp_new_cfunc (lisp_context_t *ctx, const char *name,
     return lisp_exception ();
 
   {
-    struct lisp_function *fn = lisp_get_object (ctx, func, LISP_CLASS_FUNCTION);
+    struct lisp_function *fn
+        = lisp_get_object (ctx, func, LISP_CLASS_FUNCTION);
     fn->arg_max = n;
     fn->cfunc = cfunc;
   }
@@ -1588,7 +1583,6 @@ lisp_new_int32 (lisp_context_t *ctx, int32_t v)
   (void)ctx;
   return val;
 }
-
 
 lisp_value_t
 lisp_true ()
@@ -1610,7 +1604,7 @@ lisp_to_bool (lisp_context_t *ctx, lisp_value_ref_t val, int *res)
   if (LISP_IS_EXCEPTION (val))
     return -1;
 
-  if (!LISP_IS_BOOL(val))
+  if (!LISP_IS_BOOL (val))
     {
       lisp_throw_internal_error (ctx, "Expected a boolean");
       return -1;
@@ -1634,7 +1628,7 @@ lisp_define (lisp_context_t *ctx, lisp_value_ref_t args, int magic,
 {
   lisp_value_t sig = lisp_car (ctx, args);
 
-  if (LISP_IS_LIST(sig))
+  if (LISP_IS_LIST (sig))
     { // defining function
       lisp_value_t name = lisp_car (ctx, sig);
       lisp_value_t params = lisp_cdr (ctx, sig);
@@ -1648,7 +1642,7 @@ lisp_define (lisp_context_t *ctx, lisp_value_ref_t args, int magic,
 
       return lisp_nil ();
     }
-  else if (LISP_IS_SYMBOL(sig))
+  else if (LISP_IS_SYMBOL (sig))
     { // define variable
       lisp_value_t tmp = lisp_cdr (ctx, args);
       lisp_value_t expr = lisp_car (ctx, tmp);
@@ -1870,9 +1864,8 @@ lisp_named_lambda (lisp_context_t *ctx, lisp_value_ref_t args, int magic,
   params = lisp_car (ctx, args);
   body = lisp_cdr (ctx, args);
 
-  val = lisp_new_function (ctx, lisp_car (ctx, params),
-                           lisp_cdr (ctx, params), body,
-                           lisp_function_invoker);
+  val = lisp_new_function (ctx, lisp_car (ctx, params), lisp_cdr (ctx, params),
+                           body, lisp_function_invoker);
 
   return val;
 }
@@ -1917,7 +1910,7 @@ lisp_begin (lisp_context_t *ctx, lisp_value_ref_t args, int magic,
 static lisp_value_t
 lisp_gc_ (lisp_context_t *ctx, int argc, lisp_value_ref_t *argv)
 {
-  GC_collect_a_little();
+  GC_collect_a_little ();
   return lisp_nil ();
 }
 
@@ -1926,19 +1919,6 @@ lisp_eval_ (lisp_context_t *ctx, int argc, lisp_value_ref_t *argv)
 {
   return lisp_eval (ctx, argv[0]);
 }
-
-static lisp_value_t
-lisp_dump_runtime (lisp_context_t *ctx, int argc, lisp_value_ref_t *argv)
-{
-  lisp_runtime_t *rt = lisp_get_runtime (ctx);
-
-  return lisp_nil ();
-}
-
-// static lisp_value_t
-// lisp_read (lisp_context_t *ctx, int argc, lisp_value_ref_t *argv)
-// {
-// }
 
 /**
  * Vector
@@ -1953,7 +1933,7 @@ struct lisp_vector
   lisp_value_t *data;
 };
 
-static const struct lisp_object_class lisp_vector_operations = {
+static const struct lisp_object_class lisp_vector_class = {
   .class_id = LISP_CLASS_VECTOR,
 };
 
@@ -1967,7 +1947,7 @@ lisp_new_vector (lisp_context_t *ctx, int n, lisp_value_ref_t *elems)
   if (!vec)
     return lisp_exception ();
 
-  LISP_OBJECT_INIT (vec, &lisp_vector_operations);
+  LISP_OBJECT_INIT (vec, &lisp_vector_class);
 
   vec->capacity = n;
   vec->length = n;
@@ -1982,7 +1962,7 @@ lisp_new_vector (lisp_context_t *ctx, int n, lisp_value_ref_t *elems)
       vec->data[i] = elems[i];
     }
 
-  return LISP_MAKE_PTR(vec);
+  return LISP_MAKE_PTR (vec);
 }
 
 static lisp_value_t
@@ -2004,7 +1984,7 @@ lisp_make_vector (lisp_context_t *ctx, int argc, lisp_value_ref_t *argv)
   if (!vec)
     return lisp_exception ();
 
-  LISP_OBJECT_INIT (vec, &lisp_vector_operations);
+  LISP_OBJECT_INIT (vec, &lisp_vector_class);
 
   vec->length = k;
   vec->capacity = k;
@@ -2019,7 +1999,7 @@ lisp_make_vector (lisp_context_t *ctx, int argc, lisp_value_ref_t *argv)
       vec->data[--k] = o;
     }
 
-  return LISP_MAKE_PTR(vec);
+  return LISP_MAKE_PTR (vec);
 }
 
 static lisp_value_t
@@ -2081,32 +2061,31 @@ lisp_vector_set (lisp_context_t *ctx, int argc, lisp_value_ref_t *argv)
   if (pos < 0 || (size_t)pos >= vec->length)
     return lisp_throw_internal_error (ctx, "Out of range");
 
-  {
-    lisp_value_t tmp = vec->data[pos];
-    vec->data[pos] = argv[2];
-  }
+  vec->data[pos] = argv[2];
 
   return lisp_nil ();
 }
 
 static lisp_value_t
-lisp_display(lisp_context_t *ctx, int argc, lisp_value_ref_t *argv)
+lisp_display (lisp_context_t *ctx, int argc, lisp_value_ref_t *argv)
 {
   int i;
   char *s;
   bool need_delim = false;
-  
-  for (i = 0; i < argc; ++i) {
-    s = lisp_value_to_string(ctx, argv[i]);
-    
-    if (need_delim) {
-      printf(" ");
-    }
-    need_delim = true;
-    printf("%s", s);
-  }
 
-  return lisp_nil();
+  for (i = 0; i < argc; ++i)
+    {
+      s = lisp_value_to_string (ctx, argv[i]);
+
+      if (need_delim)
+        {
+          printf (" ");
+        }
+      need_delim = true;
+      printf ("%s", s);
+    }
+
+  return lisp_nil ();
 }
 
 static lisp_value_t
@@ -2114,18 +2093,19 @@ lisp_less (lisp_context_t *ctx, int argc, lisp_value_ref_t *argv)
 {
   int i;
 
-  for (i = 0; i + 1 < argc; ++i) {
-    int32_t v1 = -1;
-    int32_t v2 = -2;
+  for (i = 0; i + 1 < argc; ++i)
+    {
+      int32_t v1 = -1;
+      int32_t v2 = -2;
 
-    if (lisp_to_int32(ctx, &v1, argv[i]) ||
-	lisp_to_int32(ctx, &v2, argv[i + 1]))
-      return lisp_exception();
-    if (!(v1 < v2))
-      return lisp_false();
-  }
+      if (lisp_to_int32 (ctx, &v1, argv[i])
+          || lisp_to_int32 (ctx, &v2, argv[i + 1]))
+        return lisp_exception ();
+      if (!(v1 < v2))
+        return lisp_false ();
+    }
 
-  return lisp_true();
+  return lisp_true ();
 }
 
 lisp_value_t
@@ -2134,14 +2114,15 @@ lisp_sum (lisp_context_t *ctx, int argc, lisp_value_ref_t *argv)
   int sum = 0;
   int i;
 
-  for (i = 0; i < argc; ++i) {
-    int32_t v=0;
-    if (lisp_to_int32(ctx, &v, argv[i]))
-      return lisp_exception();
-    sum += v;
-  }
+  for (i = 0; i < argc; ++i)
+    {
+      int32_t v = 0;
+      if (lisp_to_int32 (ctx, &v, argv[i]))
+        return lisp_exception ();
+      sum += v;
+    }
 
-  return lisp_new_int32(ctx, sum);
+  return lisp_new_int32 (ctx, sum);
 }
 
 lisp_value_t
@@ -2150,24 +2131,24 @@ lisp_subtract (lisp_context_t *ctx, int argc, lisp_value_ref_t *argv)
   int result = 0;
   int i;
 
-  
   if (argc == 0)
-    return lisp_new_int32(ctx, 0);
+    return lisp_new_int32 (ctx, 0);
 
-  if (lisp_to_int32(ctx, &result, argv[0]))
-    return lisp_exception();
+  if (lisp_to_int32 (ctx, &result, argv[0]))
+    return lisp_exception ();
 
   if (argc == 1)
-    return lisp_new_int32(ctx, -result);
-  
-  for (i = 1; i < argc; ++i) {
-    int v = 0;
-    if (lisp_to_int32(ctx, &v, argv[i]))
-      return lisp_exception();
-    result -= v;
-  }
+    return lisp_new_int32 (ctx, -result);
 
-  return lisp_new_int32(ctx, result);
+  for (i = 1; i < argc; ++i)
+    {
+      int v = 0;
+      if (lisp_to_int32 (ctx, &v, argv[i]))
+        return lisp_exception ();
+      result -= v;
+    }
+
+  return lisp_new_int32 (ctx, result);
 }
 
 static int
@@ -2229,15 +2210,13 @@ lisp_new_global_context (lisp_runtime_t *rt)
   lisp_context_define_var (ctx, lisp_interned_symbol (ctx, "NIL"),
                            lisp_nil ());
 
-  LISP_DEFINE_CFUNC(ctx, "+", lisp_sum, -1);
-  LISP_DEFINE_CFUNC(ctx, "-", lisp_subtract, -1);
-  LISP_DEFINE_CFUNC(ctx, "<", lisp_less, -1);
-  LISP_DEFINE_CFUNC(ctx, "DISPLAY", lisp_display, -1);
-  
-  LISP_DEFINE_CFUNC (ctx, "DUMP-RUNTIME", lisp_dump_runtime, 0);
+  LISP_DEFINE_CFUNC (ctx, "+", lisp_sum, -1);
+  LISP_DEFINE_CFUNC (ctx, "-", lisp_subtract, -1);
+  LISP_DEFINE_CFUNC (ctx, "<", lisp_less, -1);
+  LISP_DEFINE_CFUNC (ctx, "DISPLAY", lisp_display, -1);
 
   LISP_DEFINE_CFUNC (ctx, "GC", lisp_gc_, 0);
-  
+
   r = lisp_context_new_with_parent (ctx, "TOP-LEVEL");
 
   return r;
@@ -2259,7 +2238,7 @@ lisp_eval (lisp_context_t *ctx, lisp_value_ref_t val)
           return lisp_exception ();
         }
 
-      if (lisp_is_class(func, LISP_CLASS_FUNCTION))
+      if (lisp_is_class (func, LISP_CLASS_FUNCTION))
         {
 
           struct lisp_function *fn
@@ -2286,7 +2265,7 @@ lisp_eval (lisp_context_t *ctx, lisp_value_ref_t val)
       return r;
     }
 
-  if (LISP_IS_SYMBOL(val))
+  if (LISP_IS_SYMBOL (val))
     {
       return lisp_context_get_var (ctx, val);
     }
@@ -2302,5 +2281,3 @@ lisp_function_format (lisp_context_t *ctx, struct lisp_object *obj,
   sbprintf (buf, "[Function %s]", LISP_SYMBOL_STR (func->name));
   return 0;
 }
-
-
