@@ -2,6 +2,7 @@
 #include "dynarray.h"
 #include "hashtable.h"
 #include "list.h"
+#include "rbtree.h"
 #include "string_buf.h"
 #include "symbol_enums.h"
 
@@ -14,10 +15,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <time.h>
 
 #define LISP_INTERNED_SYM_TABLE_BITS 11
-#define LISP_VAR_TABLE_BITS 8
+#define LISP_VAR_TABLE_BITS 2
 
 #define LISP_GC_INTERVAL 2
 
@@ -79,6 +81,7 @@ struct lisp_context
   struct lisp_runtime *runtime;
 
   DECLARE_HASHTABLE (var_table, LISP_VAR_TABLE_BITS);
+  struct rb_root var_map;
 };
 
 struct lisp_function;
@@ -112,6 +115,7 @@ static const struct lisp_object_class lisp_function_class = {
 struct lisp_variable
 {
   struct hlist_node node;
+  struct rb_node rb;
 
   lisp_value_t name;
   lisp_value_t value;
@@ -125,7 +129,6 @@ lisp_nil (void)
 }
 
 static int lisp_install_default_symbols (lisp_runtime_t *rt);
-
 
 lisp_runtime_t *
 lisp_runtime_new (void)
@@ -155,6 +158,7 @@ lisp_context_init (struct lisp_context *ctx, lisp_runtime_t *rt,
 {
   ctx->obj.ops = &lisp_context_class;
   hash_init (ctx->var_table);
+  rb_root_init (&ctx->var_map);
   ctx->parent = NULL;
   ctx->runtime = rt;
   ctx->name = lisp_strdup_rt (rt, name);
@@ -632,7 +636,7 @@ lisp_new_string_len (lisp_context_t *ctx, const char *n, size_t len)
 #define LISP_STRING_OBJECT_INIT(name, value)                                  \
   {                                                                           \
     {                                                                         \
-      &lisp_string_class,                                                \
+      &lisp_string_class,                                                     \
     },                                                                        \
         1, (char *)(value)                                                    \
   }
@@ -1294,6 +1298,24 @@ lisp_hash_str (const char *s)
   return val;
 }
 
+static struct lisp_variable *
+lisp_find_var_from_map (struct rb_root *tree, lisp_value_ref_t name)
+{
+  struct rb_node *node = tree->rb_node;
+  while (node != NULL)
+    {
+      struct lisp_variable *var = rb_entry (node, struct lisp_variable, rb);
+      int c = strcasecmp (LISP_SYMBOL_STR (name), LISP_SYMBOL_STR (var->name));
+      if (c < 0)
+        node = node->rb_left;
+      else if (c > 0)
+        node = node->rb_right;
+      else
+        return var;
+    }
+  return NULL;
+}
+
 static lisp_value_t
 lisp_context_get_var (lisp_context_t *ctx, lisp_value_ref_t name)
 {
@@ -1310,9 +1332,13 @@ lisp_context_get_var (lisp_context_t *ctx, lisp_value_ref_t name)
     {
       hash_for_each_possible (ctx->var_table, var, node, key)
         {
-          if (lisp_sym_eq (name, var->name))
+          if (lisp_eqv (name, var->name))
             return var->value;
         }
+
+      var = lisp_find_var_from_map (&ctx->var_map, name);
+      if (var != NULL)
+        return var->value;
 
       ctx = ctx->parent;
     }
@@ -1342,12 +1368,19 @@ lisp_context_set_var (lisp_context_t *ctx, lisp_value_ref_t name,
     {
       hash_for_each_possible (ctx->var_table, var, node, key)
         {
-          if (lisp_sym_eq (name, var->name))
+          if (lisp_eqv (name, var->name))
             {
               var->value = value;
 
               return lisp_nil ();
             }
+        }
+
+      var = lisp_find_var_from_map (&ctx->var_map, name);
+      if (var != NULL)
+        {
+          var->value = value;
+          return lisp_nil ();
         }
 
       ctx = ctx->parent;
@@ -1356,12 +1389,38 @@ lisp_context_set_var (lisp_context_t *ctx, lisp_value_ref_t name,
   return lisp_throw_internal_error (orig_ctx, "no such variable");
 }
 
+static struct lisp_variable *
+lisp_add_var_to_map (struct rb_root *tree, struct lisp_variable *var)
+{
+  struct rb_node *parent = NULL;
+  struct rb_node **link = &tree->rb_node;
+  int c;
+
+  while (*link != NULL)
+    {
+      parent = *link;
+      c = strcasecmp (
+          LISP_SYMBOL_STR (var->name),
+          LISP_SYMBOL_STR (rb_entry (parent, struct lisp_variable, rb)->name));
+      if (c < 0)
+        link = &parent->rb_left;
+      else if (c > 0)
+        link = &parent->rb_right;
+      else
+        return rb_entry (parent, struct lisp_variable, rb);
+    }
+
+  rb_link_node (&var->rb, parent, link);
+  rb_balance_insert (&var->rb, tree);
+  return NULL;
+}
+
 static int
 lisp_context_define_var (lisp_context_t *ctx, lisp_value_t name,
                          lisp_value_t value)
 {
   struct lisp_variable *var;
-  uint32_t key;
+  //  uint32_t key;
 
   if (LISP_IS_EXCEPTION (name) || LISP_IS_EXCEPTION (value))
     goto fail;
@@ -1379,9 +1438,15 @@ lisp_context_define_var (lisp_context_t *ctx, lisp_value_t name,
   var->name = name;
   var->value = value;
 
-  key = lisp_hash_str (LISP_SYMBOL_STR (name));
+  /* key = lisp_hash_str (LISP_SYMBOL_STR (name)); */
 
-  hash_add (ctx->var_table, &var->node, key);
+  /* hash_add (ctx->var_table, &var->node, key); */
+
+  if (lisp_add_var_to_map (&ctx->var_map, var))
+    {
+      lisp_throw_internal_error (ctx, "name is already defined");
+      goto fail;
+    }
 
   return 0;
 
