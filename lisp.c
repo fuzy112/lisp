@@ -283,6 +283,18 @@ lisp_cdr (lisp_context_t *ctx, lisp_value_ref_t val)
   return cons->cdr;
 }
 
+static lisp_value_t
+lisp_car_f (lisp_context_t *ctx, int argc, lisp_value_ref_t *argv)
+{
+  return lisp_car (ctx, argv[0]);
+}
+
+static lisp_value_t
+lisp_cdr_f (lisp_context_t *ctx, int argc, lisp_value_ref_t *argv)
+{
+  return lisp_cdr (ctx, argv[1]);
+}
+
 static int
 lisp_cons_format (lisp_context_t *ctx, struct lisp_object *obj,
                   struct string_buf *buf)
@@ -1651,6 +1663,7 @@ lisp_to_bool (lisp_context_t *ctx, lisp_value_ref_t val, int *res)
   return 0;
 }
 
+
 /***************************************************************************************
  *  Special forms
  ***************************************************************************************/
@@ -2188,6 +2201,25 @@ lisp_subtract (lisp_context_t *ctx, int argc, lisp_value_ref_t *argv)
   return lisp_new_int32 (ctx, result);
 }
 
+static lisp_value_t
+lisp_apply (lisp_context_t *ctx, int argc, lisp_value_ref_t *argv)
+{
+  struct lisp_function *fn
+      = lisp_get_object (ctx, argv[0], LISP_CLASS_FUNCTION);
+  if (!fn)
+    return lisp_exception ();
+
+  return lisp_eval (ctx, lisp_new_cons (ctx, LISP_MAKE_PTR (fn), argv[1]));
+}
+
+static lisp_value_t
+lisp_nullp (lisp_context_t *ctx, int argc, lisp_value_ref_t *argv)
+{
+  if (LISP_IS_NIL (argv[0]))
+    return lisp_true ();
+  return lisp_false ();
+}
+
 static int
 lisp_define_cfunc (lisp_context_t *ctx, lisp_value_t name,
                    lisp_cfunc_simple *cfunc, int n)
@@ -2231,6 +2263,11 @@ lisp_new_global_context (lisp_runtime_t *rt)
   LISP_DEFINE_MACRO (ctx, "SET!", lisp_set_, 0);
 
   LISP_DEFINE_CFUNC (ctx, "EVAL", lisp_eval_, 1);
+  LISP_DEFINE_CFUNC (ctx, "APPLY", lisp_apply, 2);
+
+  LISP_DEFINE_CFUNC (ctx, "NULL?", lisp_nullp, 1);
+  LISP_DEFINE_CFUNC (ctx, "CAR", lisp_car_f, 1);
+  LISP_DEFINE_CFUNC (ctx, "CDR", lisp_cdr_f, 1);
 
   LISP_DEFINE_CFUNC (ctx, "MAKE-VECTOR", lisp_make_vector, 2);
   LISP_DEFINE_CFUNC (ctx, "VECTOR", lisp_new_vector, -1);
