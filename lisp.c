@@ -19,8 +19,6 @@
 #include <time.h>
 
 #define LISP_INTERNED_SYM_TABLE_BITS 11
-#define LISP_VAR_TABLE_BITS 2
-
 #define LISP_GC_INTERVAL 2
 
 struct lisp_object;
@@ -80,7 +78,6 @@ struct lisp_context
   struct lisp_context *parent;
   struct lisp_runtime *runtime;
 
-  DECLARE_HASHTABLE (var_table, LISP_VAR_TABLE_BITS);
   struct rb_root var_map;
 };
 
@@ -157,7 +154,6 @@ lisp_context_init (struct lisp_context *ctx, lisp_runtime_t *rt,
                    const char *name, lisp_context_t *parent)
 {
   ctx->obj.ops = &lisp_context_class;
-  hash_init (ctx->var_table);
   rb_root_init (&ctx->var_map);
   ctx->parent = NULL;
   ctx->runtime = rt;
@@ -1319,7 +1315,6 @@ lisp_find_var_from_map (struct rb_root *tree, lisp_value_ref_t name)
 static lisp_value_t
 lisp_context_get_var (lisp_context_t *ctx, lisp_value_ref_t name)
 {
-  uint32_t key;
   struct lisp_variable *var;
   lisp_context_t *orig_ctx = ctx;
   if (LISP_IS_EXCEPTION (name))
@@ -1327,15 +1322,8 @@ lisp_context_get_var (lisp_context_t *ctx, lisp_value_ref_t name)
   if (!LISP_IS_SYMBOL (name))
     return lisp_throw_internal_error (ctx, "type error");
 
-  key = lisp_hash_str (LISP_SYMBOL_STR (name));
   while (ctx != NULL)
     {
-      hash_for_each_possible (ctx->var_table, var, node, key)
-        {
-          if (lisp_eqv (name, var->name))
-            return var->value;
-        }
-
       var = lisp_find_var_from_map (&ctx->var_map, name);
       if (var != NULL)
         return var->value;
@@ -1351,7 +1339,6 @@ static lisp_value_t
 lisp_context_set_var (lisp_context_t *ctx, lisp_value_ref_t name,
                       lisp_value_t value)
 {
-  uint32_t key;
   struct lisp_variable *var;
   lisp_context_t *orig_ctx = ctx;
   if (LISP_IS_EXCEPTION (name))
@@ -1363,19 +1350,8 @@ lisp_context_set_var (lisp_context_t *ctx, lisp_value_ref_t name,
       return lisp_throw_internal_error (ctx, "type error");
     }
 
-  key = lisp_hash_str (LISP_SYMBOL_STR (name));
   while (ctx != NULL)
     {
-      hash_for_each_possible (ctx->var_table, var, node, key)
-        {
-          if (lisp_eqv (name, var->name))
-            {
-              var->value = value;
-
-              return lisp_nil ();
-            }
-        }
-
       var = lisp_find_var_from_map (&ctx->var_map, name);
       if (var != NULL)
         {
@@ -1420,7 +1396,6 @@ lisp_context_define_var (lisp_context_t *ctx, lisp_value_t name,
                          lisp_value_t value)
 {
   struct lisp_variable *var;
-  //  uint32_t key;
 
   if (LISP_IS_EXCEPTION (name) || LISP_IS_EXCEPTION (value))
     goto fail;
@@ -1437,10 +1412,6 @@ lisp_context_define_var (lisp_context_t *ctx, lisp_value_t name,
 
   var->name = name;
   var->value = value;
-
-  /* key = lisp_hash_str (LISP_SYMBOL_STR (name)); */
-
-  /* hash_add (ctx->var_table, &var->node, key); */
 
   if (lisp_add_var_to_map (&ctx->var_map, var))
     {
@@ -1461,6 +1432,7 @@ lisp_function_set_args (lisp_context_t *ctx, lisp_context_t *new_ctx,
   lisp_value_t name;
   lisp_value_t expr;
   lisp_value_t value;
+
   while (!LISP_IS_NIL (params))
     {
       if (LISP_IS_SYMBOL (params))
