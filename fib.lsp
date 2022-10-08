@@ -7,4 +7,4 @@
 (display (fib 27) "\n")
 
 (gc)
-(dump-runtime)
+;(dump-runtime)
