@@ -1,3 +1,4 @@
+#define _GNU_SOURCE 1
 #include "lisp.h"
 #include <errno.h>
 #include <fcntl.h>
@@ -12,8 +13,8 @@ static int
 repl ()
 {
   lisp_runtime_t *rt = lisp_runtime_new ();
-  lisp_context_t *ctx = lisp_new_global_context (rt);
-  lisp_reader_t *reader = lisp_reader_new (ctx, stdin);
+  lisp_env_t *env = lisp_new_top_level_env (rt);
+  lisp_reader_t *reader = lisp_reader_new (env, stdin);
 
   lisp_value_t exp;
   lisp_value_t val;
@@ -21,18 +22,18 @@ repl ()
   while (!feof (stdin))
     {
       fprintf (stderr, ">>> ");
-      
+
       exp = lisp_read_form (reader);
       if (LISP_IS_EXCEPTION (exp)) {
-        lisp_print_exception (ctx);
+        lisp_print_exception (env);
         break;
       }
-      // lisp_print_value (ctx, exp);
-      val = lisp_eval (ctx, exp);
+      // lisp_print_value (env, exp);
+      val = lisp_eval (env, exp);
       if (LISP_IS_EXCEPTION (val))
-        lisp_print_exception (ctx);
+        lisp_print_exception (env);
       else
-        lisp_print_value (ctx, val);
+        lisp_print_value (env, val);
       fflush (stdout);
     }
 
@@ -45,8 +46,8 @@ interpreter (FILE *filep, char **args)
   GC_INIT();
 
   lisp_runtime_t *rt = lisp_runtime_new ();
-  lisp_context_t *ctx = lisp_new_global_context (rt);
-  lisp_reader_t *reader = lisp_reader_new (ctx, filep);
+  lisp_env_t *env = lisp_new_top_level_env (rt);
+  lisp_reader_t *reader = lisp_reader_new (env, filep);
 
   (void)args;
 
@@ -57,7 +58,7 @@ interpreter (FILE *filep, char **args)
       if (LISP_IS_EXCEPTION (expr))
         goto fail;
 
-      val = lisp_eval (ctx, expr);
+      val = lisp_eval (env, expr);
       if (LISP_IS_EXCEPTION (val))
         goto fail;
 
@@ -66,7 +67,7 @@ interpreter (FILE *filep, char **args)
   return 0;
 
 fail:
-  lisp_print_exception (ctx);
+  lisp_print_exception (env);
 
   return -1;
 }
@@ -93,4 +94,6 @@ main (int argc, char **argv)
 
     return res;
   }
+
+
 }

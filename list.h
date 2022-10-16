@@ -839,7 +839,7 @@ static inline int hlist_unhashed(const struct hlist_node *h)
  * hlist_unhashed_lockless - Version of hlist_unhashed for lockless use
  * @h: Node to be checked
  *
- * This variant of hlist_unhashed() must be used in lockless contexts
+ * This variant of hlist_unhashed() must be used in lockless envs
  * to avoid potential load-tearing.  The LIST_READ_ONCE() is paired with the
  * various LIST_WRITE_ONCE() in hlist helpers that are defined below.
  */
