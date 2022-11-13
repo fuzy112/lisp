@@ -24,10 +24,7 @@
 struct lisp_object;
 
 #define LISP_MAKE_PTR(obj)                                                    \
-  (lisp_value_t)                                                              \
-  {                                                                           \
-    .ptr = (obj)                                                              \
-  }
+  (lisp_value_t) { .ptr = (obj) }
 
 enum lisp_class_id
 {
@@ -131,7 +128,7 @@ static int lisp_install_default_symbols (lisp_runtime_t *rt);
 lisp_runtime_t *
 lisp_runtime_new (void)
 {
-  lisp_runtime_t *rt = GC_NEW (*rt);
+  lisp_runtime_t *rt = GC_NEW (lisp_runtime_t);
   rt->exception_list = lisp_nil ();
   hash_init (rt->interned_sym_table);
   INIT_DYNARRAY (rt, interned_sym_array);
@@ -772,7 +769,8 @@ lisp_print_exception (lisp_env_t *env)
   lisp_print_value (env, error);
 }
 
-static inline const char *LISP_SYMBOL_STR(lisp_value_t sym)
+static inline const char *
+LISP_SYMBOL_STR (lisp_value_t sym)
 {
   return ((struct lisp_symbol *)(sym).ptr)->name;
 }
