@@ -680,6 +680,8 @@ lisp_throw (lisp_env_t *env, lisp_value_t error)
   printf ("%s: throwing ", env->name);
   lisp_print_value (env, error);
   rt->exception_list = lisp_new_pair (env, error, rt->exception_list);
+
+  abort ();
   return lisp_exception ();
 }
 
@@ -702,7 +704,6 @@ lisp_value_t
 lisp_throw_internal_error (lisp_env_t *env, const char *fmt, ...)
 {
   va_list ap;
-
   assert (fmt != NULL);
 
   va_start (ap, fmt);
@@ -725,7 +726,6 @@ typedef lisp_value_t lisp_native_procedure_simple (lisp_env_t *env, int argc,
 
 enum lisp_parse_error
 {
-  LISP_PE_EOF = 1,
   LISP_PE_EARLY_EOF = 2,
   LISP_PE_EXPECT_RIGHT_PAREN = 3,
   LISP_PE_INVALID_NUMBER_LITERAL = 4,
@@ -861,7 +861,7 @@ lisp_read_form (struct lisp_reader *reader)
 
   token = lisp_peek_token (reader);
   if (!token)
-    return lisp_throw_parse_error (reader->env, LISP_PE_EOF, "EOF");
+    return LISP_EOF_OBJECT;
 
   if (string_equal (token, "(") || string_equal (token, "["))
     return lisp_read_list (reader);
@@ -1243,6 +1243,7 @@ lisp_value_format (lisp_env_t *env, lisp_value_t val, struct string_buf *buf)
         }
     }
 
+  return sbprintf (buf, "#UNKNOWN");
   assert (0 && "unreachable");
 }
 
@@ -2136,6 +2137,17 @@ lisp_display (lisp_env_t *env, int argc, lisp_value_t *argv)
 }
 
 static lisp_value_t
+lisp_newline (lisp_env_t *env, int argc, lisp_value_t *argv)
+{
+  (void)env;
+  (void)argc;
+  (void)argv;
+  puts ("");
+
+  return lisp_nil ();
+}
+
+static lisp_value_t
 lisp_less (lisp_env_t *env, int argc, lisp_value_t *argv)
 {
   int i;
@@ -2149,6 +2161,26 @@ lisp_less (lisp_env_t *env, int argc, lisp_value_t *argv)
           || lisp_to_int32 (env, &v2, argv[i + 1]))
         return lisp_exception ();
       if (!(v1 < v2))
+        return lisp_false ();
+    }
+
+  return lisp_true ();
+}
+
+static lisp_value_t
+lisp_equal_n (lisp_env_t *env, int argc, lisp_value_t *argv)
+{
+  int i;
+
+  for (i = 0; i + 1 < argc; ++i)
+    {
+      int32_t v1 = -1;
+      int32_t v2 = -1;
+
+      if (lisp_to_int32 (env, &v1, argv[i])
+          || lisp_to_int32 (env, &v2, argv[i + 1]))
+        return lisp_exception ();
+      if (v1 != v2)
         return lisp_false ();
     }
 
@@ -2286,7 +2318,9 @@ lisp_new_top_level_env (lisp_runtime_t *rt)
   LISP_DEFINE_NATIVE_PROCEDURE (env, "+", lisp_sum, -1);
   LISP_DEFINE_NATIVE_PROCEDURE (env, "-", lisp_subtract, -1);
   LISP_DEFINE_NATIVE_PROCEDURE (env, "<", lisp_less, -1);
+  LISP_DEFINE_NATIVE_PROCEDURE (env, "=", lisp_equal_n, -1);
   LISP_DEFINE_NATIVE_PROCEDURE (env, "DISPLAY", lisp_display, -1);
+  LISP_DEFINE_NATIVE_PROCEDURE (env, "NEWLINE", lisp_newline, 1);
 
   LISP_DEFINE_NATIVE_PROCEDURE (env, "GC", lisp_gc_, 0);
 
@@ -2295,55 +2329,306 @@ lisp_new_top_level_env (lisp_runtime_t *rt)
   return r;
 }
 
-lisp_value_t
-lisp_eval (lisp_env_t *env, lisp_value_t val)
+static bool
+lisp_is_primitive_procedure (lisp_env_t *env, lisp_value_t val)
+{
+  struct lisp_procedure *proc
+      = lisp_get_object (env, val, LISP_CLASS_PROCEDURE);
+  if (proc)
+    return proc->invoker != lisp_procedure_invoker;
+  return false;
+}
+
+static bool
+lisp_is_compound_procedure (lisp_env_t *env, lisp_value_t val)
+{
+  struct lisp_procedure *proc
+      = lisp_get_object (env, val, LISP_CLASS_PROCEDURE);
+  if (proc)
+    return proc->invoker == lisp_procedure_invoker;
+  return false;
+}
+
+enum lisp_syntax_type
+{
+  LISP_SYNTAX_SELF_EVAL,
+  LISP_SYNTAX_VARIABLE,
+  LISP_SYNTAX_QUOTED,
+  LISP_SYNTAX_IF,
+  LISP_SYNTAX_DEFINITION,
+  LISP_SYNTAX_LAMBDA,
+  LISP_SYNTAX_ASSIGNMENT,
+  LISP_SYNTAX_APPLICATION,
+  LISP_SYNTAX_BEGIN,
+};
+
+static int
+lisp_syntax_type (lisp_env_t *env, lisp_value_t exp)
+{
+  if (lisp_is_class (exp, LISP_CLASS_SYMBOL))
+    return LISP_SYNTAX_VARIABLE;
+  if (LISP_IS_LIST (exp) && !LISP_IS_NIL (exp))
+    {
+      lisp_value_t car = lisp_car (env, exp);
+      if (lisp_eqv (lisp_interned_symbol (env, "IF"), car))
+        return LISP_SYNTAX_IF;
+      if (lisp_eqv (lisp_interned_symbol (env, "DEFINE"), car))
+        return LISP_SYNTAX_DEFINITION;
+      if (lisp_eqv (lisp_interned_symbol (env, "SET!"), car))
+        return LISP_SYNTAX_ASSIGNMENT;
+      if (lisp_eqv (lisp_interned_symbol (env, "QUOTE"), car))
+        return LISP_SYNTAX_QUOTED;
+      if (lisp_eqv (lisp_interned_symbol (env, "LAMBDA"), car))
+        return LISP_SYNTAX_LAMBDA;
+      if (lisp_eqv (lisp_interned_symbol (env, "BEGIN"), car))
+        return LISP_SYNTAX_BEGIN;
+      return LISP_SYNTAX_APPLICATION;
+    }
+  return LISP_SYNTAX_SELF_EVAL;
+}
+
+static lisp_value_t
+lisp_reverse (lisp_env_t *env, lisp_value_t val)
 {
   lisp_value_t r = LISP_NIL;
 
-  if (LISP_IS_LIST (val) && !LISP_IS_NIL (val))
+  while (!LISP_IS_NIL (val))
     {
-      lisp_value_t args;
-      lisp_value_t proc_expr = lisp_car (env, val);
-      lisp_value_t proc = lisp_eval (env, proc_expr);
-
-      if (LISP_IS_EXCEPTION (proc))
-        {
-          return lisp_exception ();
-        }
-
-      if (lisp_is_class (proc, LISP_CLASS_PROCEDURE))
-        {
-
-          struct lisp_procedure *fn
-              = lisp_get_object (env, proc, LISP_CLASS_PROCEDURE);
-
-          args = lisp_cdr (env, val);
-          r = fn->invoker (env, args, fn);
-          return r;
-        }
-
-      else if (lisp_is_class (proc, LISP_CLASS_SYNTAX))
-        {
-          struct lisp_syntax *syntax
-              = lisp_get_object (env, proc, LISP_CLASS_SYNTAX);
-          args = lisp_cdr (env, val);
-          r = syntax->proc (env, args, syntax->magic, syntax->data);
-        }
-
-      else
-        {
-          lisp_throw_internal_error (env, "Need a proction");
-          return lisp_exception ();
-        }
-
-      return r;
+      r = lisp_new_pair (env, lisp_car (env, val), r);
+      val = lisp_cdr (env, val);
     }
 
-  if (LISP_IS_SYMBOL (val))
+  return r;
+}
+
+lisp_value_t
+lisp_eval (lisp_env_t *env, lisp_value_t exp)
+{
+  lisp_value_t val = LISP_NIL;
+  lisp_value_t argl = LISP_NIL;
+  lisp_value_t proc;
+  lisp_value_t stack = LISP_EOF_OBJECT;
+  lisp_value_t cont;
+  lisp_value_t unev;
+
+  cont.ptr = &&eval_end;
+
+#define PUSH(x)                                                               \
+  do                                                                          \
+    {                                                                         \
+      stack = lisp_new_pair (env, *(lisp_value_t *)&(x), stack);              \
+    }                                                                         \
+  while (0)
+#define POP(x)                                                                \
+  do                                                                          \
+    {                                                                         \
+      lisp_value_t tmp = lisp_car (env, stack);                               \
+      memcpy (&(x), &tmp, sizeof (x));                                        \
+      stack = lisp_cdr (env, stack);                                          \
+    }                                                                         \
+  while (0)
+
+eval_dispatch:
+  switch (lisp_syntax_type (env, exp))
     {
-      return lisp_env_get_var (env, val);
+    case LISP_SYNTAX_SELF_EVAL:
+      val = exp;
+      goto *cont.ptr;
+
+    case LISP_SYNTAX_VARIABLE:
+      val = lisp_env_get_var (env, exp);
+      goto *cont.ptr;
+
+    case LISP_SYNTAX_QUOTED:
+      val = lisp_car (env, lisp_cdr (env, exp));
+      goto *cont.ptr;
+
+    case LISP_SYNTAX_LAMBDA:
+      {
+        lisp_value_t tmp = lisp_cdr (env, exp);
+        lisp_value_t params = lisp_car (env, tmp);
+        lisp_value_t body = lisp_cdr (env, tmp);
+        val = lisp_new_procedure (env, lisp_interned_symbol (env, "#LAMBDA"),
+                                  params, body, lisp_procedure_invoker);
+        goto *cont.ptr;
+      }
+
+    case LISP_SYNTAX_APPLICATION:
+      PUSH (cont);
+      PUSH (env);
+      unev = lisp_cdr (env, exp);
+      PUSH (unev);
+      exp = lisp_car (env, exp);
+      cont.ptr = &&ev_apply_did_operator;
+      goto eval_dispatch;
+    ev_apply_did_operator:
+      POP (unev);
+      POP (env);
+      argl = LISP_NIL;
+      proc = val;
+      if (LISP_IS_NIL (unev))
+        goto apply_dispatch;
+      PUSH (proc);
+
+    ev_apply_operand_loop:
+      PUSH (argl);
+      exp = lisp_car (env, unev);
+      if (LISP_IS_NIL (lisp_cdr (env, unev)))
+        goto ev_apply_last_arg;
+      PUSH (env);
+      PUSH (unev);
+      cont.ptr = &&ev_apply_accumulate_arg;
+      goto eval_dispatch;
+
+    ev_apply_accumulate_arg:
+      POP (unev);
+      POP (env);
+      POP (argl);
+      argl = lisp_new_pair (env, val, argl);
+      unev = lisp_cdr (env, unev);
+      goto ev_apply_operand_loop;
+
+    ev_apply_last_arg:
+      cont.ptr = &&ev_apply_accumulate_last_arg;
+      goto eval_dispatch;
+
+    ev_apply_accumulate_last_arg:
+      POP (argl);
+      argl = lisp_new_pair (env, val, argl);
+      POP (proc);
+      goto apply_dispatch;
+
+    case LISP_SYNTAX_BEGIN:
+      unev = lisp_cdr (env, exp);
+      PUSH (cont);
+      goto ev_sequence;
+
+    ev_sequence:
+      exp = lisp_car (env, unev);
+      if (LISP_IS_NIL (lisp_cdr (env, unev)))
+        goto ev_sequence_last_exp;
+      PUSH (unev);
+      PUSH (env);
+      cont.ptr = &&ev_sequence_continue;
+      goto eval_dispatch;
+
+    ev_sequence_continue:
+      POP (env);
+      POP (unev);
+      unev = lisp_cdr (env, unev);
+      goto ev_sequence;
+
+    ev_sequence_last_exp:
+      POP (cont);
+      goto eval_dispatch;
+
+    case LISP_SYNTAX_IF:
+      PUSH (exp);
+      PUSH (env);
+      PUSH (cont);
+      cont.ptr = &&ev_if_decide;
+      exp = lisp_car (env, lisp_cdr (env, exp));
+      goto eval_dispatch;
+
+    ev_if_decide:
+      POP (cont);
+      POP (env);
+      POP (exp);
+      exp = lisp_cdr (env, exp);
+      {
+        int res = 0;
+        lisp_to_bool (env, val, &res);
+        if (res)
+          goto ev_if_consequent;
+      }
+      // ev_if_alternative:
+      exp = lisp_car (env, lisp_cdr (env, lisp_cdr (env, exp)));
+      goto eval_dispatch;
+    ev_if_consequent:
+      exp = lisp_car (env, lisp_cdr (env, exp));
+      goto eval_dispatch;
+
+    case LISP_SYNTAX_ASSIGNMENT:
+      unev = lisp_car (env, lisp_cdr (env, exp));
+      PUSH (unev);
+      exp = lisp_car (env, lisp_cdr (env, lisp_cdr (env, exp)));
+      PUSH (env);
+      PUSH (cont);
+      cont.ptr = &&ev_assignment_1;
+      goto eval_dispatch;
+
+    ev_assignment_1:
+      POP (cont);
+      POP (env);
+      POP (unev);
+      lisp_env_set_var (env, unev, val);
+      //      val = ok;
+      goto *cont.ptr;
+
+    case LISP_SYNTAX_DEFINITION:
+      unev = lisp_car (env, lisp_cdr (env, exp));
+      PUSH (unev);
+      exp = lisp_car (env, lisp_cdr (env, lisp_cdr (env, exp)));
+      PUSH (env);
+      PUSH (cont);
+      cont.ptr = &&ev_definition_1;
+      goto eval_dispatch;
+
+    ev_definition_1:
+      POP (cont);
+      POP (env);
+      POP (unev);
+      lisp_env_define_var (env, unev, val);
+      // val = ok;
+      goto *cont.ptr;
+
+    default:
+      assert (0 && "unreachable");
     }
 
+apply_dispatch:
+  if (lisp_is_primitive_procedure (env, proc))
+    goto primitive_apply;
+  if (lisp_is_compound_procedure (env, proc))
+    goto compound_apply;
+  goto unknown_procedure_type;
+
+primitive_apply:
+  {
+    struct lisp_procedure *primitive
+        = lisp_get_object (env, proc, LISP_CLASS_PROCEDURE);
+    val = primitive->invoker (env, lisp_reverse (env, argl), primitive);
+    POP (cont);
+    goto *cont.ptr;
+  }
+
+unknown_procedure_type:
+  assert (0 && "unknown procedure type");
+
+compound_apply:
+  {
+    struct lisp_procedure *compound
+        = lisp_get_object (env, proc, LISP_CLASS_PROCEDURE);
+    unev = compound->params;
+    env = compound->env;
+    {
+      lisp_value_t args = lisp_reverse (env, argl);
+      env = lisp_new_env_extended (env, LISP_SYMBOL_STR (compound->name));
+
+      // fixme
+      while (!LISP_IS_NIL (args))
+        {
+          lisp_value_t name = lisp_car (env, unev);
+          unev = lisp_cdr (env, unev);
+          lisp_env_define_var (env, name, lisp_car (env, args));
+          args = lisp_cdr (env, args);
+        }
+    }
+    unev = compound->body;
+    goto ev_sequence;
+  }
+
+eval_end:
   return val;
 }
 

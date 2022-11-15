@@ -11,14 +11,15 @@ enum lisp_value_tag
   LISP_TAG_VOID = 2,
   LISP_TAG_INT = 3,
   LISP_TAG_BOOL = 4,
+  LISP_TAG_EOF = 5,
 };
 
 typedef union
 {
   struct
   {
-    uintptr_t tag : 3;
-    uintptr_t i : 61;
+    uintptr_t tag : 4;
+    uintptr_t i : 60;
   };
   void *ptr;
 } lisp_value_t, lisp_value_ref_t;
@@ -49,13 +50,16 @@ lisp_value_t lisp_eval (lisp_env_t *env, lisp_value_ref_t exp);
 #define LISP_EXCEPTION                                                        \
   (lisp_value_t) { .tag = LISP_TAG_EXCEPTION, .i = 0xffffff }
 
-#define LISP_VOID \
+#define LISP_VOID                                                             \
   (lisp_value_t) { .tag = LISP_TAG_VOID, .i = (0) }
 
 #define LISP_TRUE                                                             \
   (lisp_value_t) { .tag = LISP_TAG_BOOL, .i = 1 }
 #define LISP_FALSE                                                            \
   (lisp_value_t) { .tag = LISP_TAG_BOOL, .i = 0 }
+
+#define LISP_EOF_OBJECT                                                       \
+  (lisp_value_t) { .tag = LISP_TAG_EOF, .i = 0 }
 
 #define LISP_IS_EXCEPTION(val) ((val).tag == LISP_TAG_EXCEPTION)
 
@@ -69,6 +73,8 @@ lisp_value_t lisp_eval (lisp_env_t *env, lisp_value_ref_t exp);
 
 #define LISP_IS_BOOL(val) ((val).tag == LISP_TAG_BOOL)
 
+#define LISP_IS_EOF(val) ((val).tag == LISP_TAG_EOF)
+
 int lisp_to_bool (lisp_env_t *env, lisp_value_ref_t v, int *res);
 
 lisp_value_t lisp_false (void);
@@ -77,7 +83,7 @@ lisp_value_t lisp_true (void);
 lisp_value_t lisp_new_real (lisp_env_t *env, double v);
 lisp_value_t lisp_new_int32 (lisp_env_t *env, int32_t v);
 
-lisp_value_t lisp_new_cons (lisp_env_t *env, lisp_value_t car,
+lisp_value_t lisp_new_pair (lisp_env_t *env, lisp_value_t car,
                             lisp_value_t cdr);
 
 lisp_value_t lisp_interned_symbol (lisp_env_t *env, const char *name);
@@ -85,8 +91,7 @@ lisp_value_t lisp_interned_symbol (lisp_env_t *env, const char *name);
 lisp_value_t lisp_new_symbol_full (lisp_env_t *env, const char *name,
                                    int is_static);
 
-lisp_value_t lisp_new_string_len (lisp_env_t *env, const char *n,
-                                  size_t len);
+lisp_value_t lisp_new_string_len (lisp_env_t *env, const char *n, size_t len);
 
 lisp_value_t lisp_new_string (lisp_env_t *env, const char *str);
 
@@ -106,8 +111,7 @@ lisp_value_t lisp_throw (lisp_env_t *env, lisp_value_t error);
 
 lisp_value_t lisp_throw_out_of_memory (lisp_env_t *env);
 
-lisp_value_t lisp_throw_internal_error (lisp_env_t *env, const char *fmt,
-                                        ...);
+lisp_value_t lisp_throw_internal_error (lisp_env_t *env, const char *fmt, ...);
 
 lisp_value_t lisp_get_exception (lisp_env_t *env);
 

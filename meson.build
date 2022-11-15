@@ -10,6 +10,6 @@ executable('lisp',
            'string_buf.c',
 	   'rbtree.c',
            dependencies : [gc_dep],
-           c_args : ['-std=gnu89', '-Werror=implicit-function-declaration',
+           c_args : ['-std=gnu99', '-Werror=implicit-function-declaration',
               '-Wno-unused-parameter'],
            install : true)

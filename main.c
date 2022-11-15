@@ -1,13 +1,13 @@
 #define _GNU_SOURCE 1
 #include "lisp.h"
+#include <editline/readline.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <gc.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
-#include <gc.h>
-#include <editline/readline.h>
 
 static int
 repl ()
@@ -24,10 +24,13 @@ repl ()
       fprintf (stderr, ">>> ");
 
       exp = lisp_read_form (reader);
-      if (LISP_IS_EXCEPTION (exp)) {
-        lisp_print_exception (env);
+      if (LISP_IS_EXCEPTION (exp))
+        {
+          lisp_print_exception (env);
+          break;
+        }
+      if (LISP_IS_EOF (exp))
         break;
-      }
       // lisp_print_value (env, exp);
       val = lisp_eval (env, exp);
       if (LISP_IS_EXCEPTION (val))
@@ -43,7 +46,7 @@ repl ()
 static int
 interpreter (FILE *filep, char **args)
 {
-  GC_INIT();
+  GC_INIT ();
 
   lisp_runtime_t *rt = lisp_runtime_new ();
   lisp_env_t *env = lisp_new_top_level_env (rt);
@@ -57,11 +60,12 @@ interpreter (FILE *filep, char **args)
       lisp_value_t expr = lisp_read_form (reader);
       if (LISP_IS_EXCEPTION (expr))
         goto fail;
+      if (LISP_IS_EOF (expr))
+        break;
 
       val = lisp_eval (env, expr);
       if (LISP_IS_EXCEPTION (val))
         goto fail;
-
     }
 
   return 0;
@@ -94,6 +98,4 @@ main (int argc, char **argv)
 
     return res;
   }
-
-
 }
